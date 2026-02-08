@@ -1,0 +1,16 @@
+[package]
+name = "krunclaw-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+dirs.workspace = true
+libkrun-sys = { path = "../libkrun-sys" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
