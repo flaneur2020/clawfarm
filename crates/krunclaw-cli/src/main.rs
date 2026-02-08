@@ -3,8 +3,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use krunclaw_runtime::doctor::run_doctor;
-use krunclaw_runtime::image::{ImageConfig, ensure_image, image_rootfs_path, inspect_image};
-use krunclaw_runtime::run::{RunConfig, default_state_dir, parse_publish, run_openclaw};
+use krunclaw_runtime::image::{
+    FetchConfig, ImageConfig, ensure_image, fetch_ubuntu_image, image_disk_path, inspect_image,
+};
+use krunclaw_runtime::run::{
+    RunConfig, default_state_dir, parse_disk_format, parse_publish, run_openclaw,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -45,10 +49,34 @@ struct RunCommand {
     image: String,
 
     #[arg(long)]
-    rootfs: Option<PathBuf>,
+    disk: Option<PathBuf>,
+
+    #[arg(long, default_value = "auto")]
+    disk_format: String,
+
+    #[arg(long, default_value = "/dev/vda1")]
+    root_device: String,
+
+    #[arg(long, default_value = "auto")]
+    root_fstype: String,
+
+    #[arg(long)]
+    root_options: Option<String>,
 
     #[arg(long)]
     state_dir: Option<PathBuf>,
+
+    #[arg(long)]
+    auto_fetch_image: bool,
+
+    #[arg(long)]
+    image_url: Option<String>,
+
+    #[arg(long)]
+    ubuntu_date: Option<String>,
+
+    #[arg(long)]
+    arch: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -57,7 +85,7 @@ struct DoctorCommand {
     image: String,
 
     #[arg(long)]
-    rootfs: Option<PathBuf>,
+    disk: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -69,7 +97,7 @@ struct ImageCommand {
 #[derive(Subcommand, Debug)]
 enum ImageAction {
     Inspect(ImageInspect),
-    Build(ImageBuild),
+    Fetch(ImageFetch),
 }
 
 #[derive(Args, Debug)]
@@ -78,19 +106,28 @@ struct ImageInspect {
     image: String,
 
     #[arg(long)]
-    rootfs: Option<PathBuf>,
+    disk: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
-struct ImageBuild {
+struct ImageFetch {
     #[arg(long, default_value = "default")]
     image: String,
 
     #[arg(long)]
-    distro: Option<String>,
+    disk: Option<PathBuf>,
 
     #[arg(long)]
-    rootfs: Option<PathBuf>,
+    url: Option<String>,
+
+    #[arg(long)]
+    ubuntu_date: Option<String>,
+
+    #[arg(long)]
+    arch: Option<String>,
+
+    #[arg(long)]
+    force: bool,
 }
 
 fn main() -> Result<()> {
@@ -116,21 +153,45 @@ fn cmd_run(args: RunCommand) -> Result<()> {
     let state_dir = args.state_dir.unwrap_or(default_state_dir()?);
 
     let image_cfg = ImageConfig {
-        image: args.image,
-        distro: None,
-        rootfs: args.rootfs,
+        image: args.image.clone(),
+        disk: args.disk.clone(),
     };
-    let image = ensure_image(&image_cfg)?;
+
+    let image = match ensure_image(&image_cfg) {
+        Ok(status) => status,
+        Err(err) if args.auto_fetch_image => {
+            eprintln!("image missing, fetching ubuntu community image: {err}");
+            fetch_ubuntu_image(&FetchConfig {
+                image: args.image.clone(),
+                disk: args.disk.clone(),
+                url: args.image_url.clone(),
+                ubuntu_date: args.ubuntu_date.clone(),
+                arch: args.arch.clone(),
+                force: false,
+            })?
+        }
+        Err(err) => return Err(err),
+    };
 
     let mut publish = Vec::new();
     for item in args.publish {
         publish.push(parse_publish(&item)?);
     }
 
+    let root_fstype = if args.root_fstype.eq_ignore_ascii_case("auto") {
+        Some("auto".to_string())
+    } else {
+        Some(args.root_fstype)
+    };
+
     let run_cfg = RunConfig {
         cpus: args.cpus,
         memory_mib: args.memory_mib,
-        rootfs: image.rootfs_path,
+        disk_image: image.disk_path,
+        disk_format: parse_disk_format(&args.disk_format)?,
+        root_device: args.root_device,
+        root_fstype,
+        root_options: args.root_options,
         workspace_dir: cwd,
         state_dir,
         gateway_port: args.port,
@@ -141,11 +202,11 @@ fn cmd_run(args: RunCommand) -> Result<()> {
 }
 
 fn cmd_doctor(args: DoctorCommand) -> Result<()> {
-    let rootfs_path = match args.rootfs {
+    let disk_path = match args.disk {
         Some(path) => path,
-        None => image_rootfs_path(&args.image)?,
+        None => image_disk_path(&args.image)?,
     };
-    let report = run_doctor(&rootfs_path);
+    let report = run_doctor(&disk_path);
 
     println!("krunclaw doctor");
     println!("  libkrun.loadable: {}", report.libkrun_loadable);
@@ -153,8 +214,8 @@ fn cmd_doctor(args: DoctorCommand) -> Result<()> {
         "  libkrun.version: {}",
         report.libkrun_version.as_deref().unwrap_or("(unavailable)")
     );
-    println!("  rootfs.exists: {}", report.rootfs_exists);
-    println!("  rootfs.path: {}", report.rootfs_path);
+    println!("  disk.exists: {}", report.disk_exists);
+    println!("  disk.path: {}", report.disk_path);
 
     if report.issues.is_empty() {
         println!("  issues: none");
@@ -173,29 +234,27 @@ fn cmd_image(args: ImageCommand) -> Result<()> {
         ImageAction::Inspect(inspect) => {
             let config = ImageConfig {
                 image: inspect.image,
-                distro: None,
-                rootfs: inspect.rootfs,
+                disk: inspect.disk,
             };
             let status = inspect_image(&config)?;
             println!("image: {}", status.image);
-            println!("rootfs: {}", status.rootfs_path.display());
+            println!("disk: {}", status.disk_path.display());
             println!("exists: {}", status.exists);
             Ok(())
         }
-        ImageAction::Build(build) => {
-            let config = ImageConfig {
-                image: build.image,
-                distro: build.distro,
-                rootfs: build.rootfs,
-            };
-            let status = inspect_image(&config)?;
-            println!("image build (placeholder)");
+        ImageAction::Fetch(fetch) => {
+            let status = fetch_ubuntu_image(&FetchConfig {
+                image: fetch.image,
+                disk: fetch.disk,
+                url: fetch.url,
+                ubuntu_date: fetch.ubuntu_date,
+                arch: fetch.arch,
+                force: fetch.force,
+            })?;
+            println!("image fetch complete");
             println!("image: {}", status.image);
-            if let Some(distro) = config.distro {
-                println!("distro: {distro}");
-            }
-            println!("target rootfs: {}", status.rootfs_path.display());
-            println!("status: not implemented yet (prepare rootfs manually for now)");
+            println!("disk: {}", status.disk_path.display());
+            println!("exists: {}", status.exists);
             Ok(())
         }
     }

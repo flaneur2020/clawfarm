@@ -6,18 +6,18 @@ use libkrun_sys::detect_libkrun_version;
 pub struct DoctorReport {
     pub libkrun_loadable: bool,
     pub libkrun_version: Option<String>,
-    pub rootfs_exists: bool,
-    pub rootfs_path: String,
+    pub disk_exists: bool,
+    pub disk_path: String,
     pub issues: Vec<String>,
 }
 
-pub fn run_doctor(rootfs_path: &Path) -> DoctorReport {
+pub fn run_doctor(disk_path: &Path) -> DoctorReport {
     let mut issues = Vec::new();
-    let rootfs_exists = rootfs_path.exists();
-    if !rootfs_exists {
+    let disk_exists = disk_path.exists();
+    if !disk_exists {
         issues.push(format!(
-            "rootfs not found: {} (run image build/import first)",
-            rootfs_path.display()
+            "disk image not found: {} (run `krunclaw image fetch` first)",
+            disk_path.display()
         ));
     }
 
@@ -33,8 +33,8 @@ pub fn run_doctor(rootfs_path: &Path) -> DoctorReport {
     DoctorReport {
         libkrun_loadable: libkrun_version.is_some(),
         libkrun_version,
-        rootfs_exists,
-        rootfs_path: rootfs_path.display().to_string(),
+        disk_exists,
+        disk_path: disk_path.display().to_string(),
         issues,
     }
 }

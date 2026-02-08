@@ -14,6 +14,9 @@ type KRunSetWorkdirFn = unsafe extern "C" fn(u32, *const c_char) -> i32;
 type KRunSetExecFn =
     unsafe extern "C" fn(u32, *const c_char, *const *const c_char, *const *const c_char) -> i32;
 type KRunStartEnterFn = unsafe extern "C" fn(u32) -> i32;
+type KRunAddDisk2Fn = unsafe extern "C" fn(u32, *const c_char, *const c_char, u32, bool) -> i32;
+type KRunSetRootDiskRemountFn =
+    unsafe extern "C" fn(u32, *const c_char, *const c_char, *const c_char) -> i32;
 
 struct LibKrunFns {
     create_ctx: KRunCreateCtxFn,
@@ -25,6 +28,8 @@ struct LibKrunFns {
     set_workdir: KRunSetWorkdirFn,
     set_exec: KRunSetExecFn,
     start_enter: KRunStartEnterFn,
+    add_disk2: Option<KRunAddDisk2Fn>,
+    set_root_disk_remount: Option<KRunSetRootDiskRemountFn>,
 }
 
 pub struct LibKrun {
@@ -40,11 +45,43 @@ pub struct ExecSpec {
     pub workdir: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum DiskImageFormat {
+    Raw,
+    Qcow2,
+    Vmdk,
+}
+
+impl DiskImageFormat {
+    fn to_krun_constant(self) -> u32 {
+        match self {
+            Self::Raw => 0,
+            Self::Qcow2 => 1,
+            Self::Vmdk => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum RootSpec {
+    VirtioFs {
+        rootfs: String,
+    },
+    DiskImage {
+        disk_path: String,
+        disk_format: DiskImageFormat,
+        read_only: bool,
+        root_device: String,
+        root_fstype: Option<String>,
+        root_options: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct RunSpec {
     pub cpus: u8,
     pub memory_mib: u32,
-    pub rootfs: String,
+    pub root: RootSpec,
     pub virtiofs_mounts: Vec<(String, String)>,
     pub port_map: Vec<(u16, u16)>,
     pub exec: ExecSpec,
@@ -82,13 +119,22 @@ impl LibKrun {
     }
 
     pub fn run(&self, spec: &RunSpec) -> Result<()> {
-        if !Path::new(&spec.rootfs).exists() {
-            bail!("rootfs path does not exist: {}", spec.rootfs);
+        match &spec.root {
+            RootSpec::VirtioFs { rootfs } => {
+                if !Path::new(rootfs).exists() {
+                    bail!("rootfs path does not exist: {rootfs}");
+                }
+            }
+            RootSpec::DiskImage { disk_path, .. } => {
+                if !Path::new(disk_path).exists() {
+                    bail!("disk image path does not exist: {disk_path}");
+                }
+            }
         }
 
         let ctx_id = unsafe { (self.fns.create_ctx)() };
         if ctx_id < 0 {
-            bail!("krun_create_ctx failed with {}", ctx_id);
+            bail!("krun_create_ctx failed with {ctx_id}");
         }
         let ctx_id = ctx_id as u32;
 
@@ -98,11 +144,81 @@ impl LibKrun {
                 "krun_set_vm_config",
             )?;
 
-            let rootfs = CString::new(spec.rootfs.clone()).context("rootfs contains null byte")?;
-            call_krun(
-                unsafe { (self.fns.set_root)(ctx_id, rootfs.as_ptr()) },
-                "krun_set_root",
-            )?;
+            match &spec.root {
+                RootSpec::VirtioFs { rootfs } => {
+                    let c_root =
+                        CString::new(rootfs.as_str()).context("rootfs contains null byte")?;
+                    call_krun(
+                        unsafe { (self.fns.set_root)(ctx_id, c_root.as_ptr()) },
+                        "krun_set_root",
+                    )?;
+                }
+                RootSpec::DiskImage {
+                    disk_path,
+                    disk_format,
+                    read_only,
+                    root_device,
+                    root_fstype,
+                    root_options,
+                } => {
+                    let add_disk2 = self.fns.add_disk2.ok_or_else(|| {
+                        anyhow!("libkrun missing krun_add_disk2; BLK support may be disabled")
+                    })?;
+                    let set_root_disk_remount = self.fns.set_root_disk_remount.ok_or_else(|| {
+                        anyhow!("libkrun missing krun_set_root_disk_remount; BLK support may be disabled")
+                    })?;
+
+                    let block_id =
+                        CString::new("rootdisk").context("internal block id contains null")?;
+                    let c_disk =
+                        CString::new(disk_path.as_str()).context("disk path contains null byte")?;
+
+                    call_krun(
+                        unsafe {
+                            add_disk2(
+                                ctx_id,
+                                block_id.as_ptr(),
+                                c_disk.as_ptr(),
+                                disk_format.to_krun_constant(),
+                                *read_only,
+                            )
+                        },
+                        "krun_add_disk2",
+                    )?;
+
+                    let c_device = CString::new(root_device.as_str())
+                        .context("root device contains null byte")?;
+                    let c_fstype = root_fstype
+                        .as_ref()
+                        .map(|value| CString::new(value.as_str()))
+                        .transpose()
+                        .context("root fstype contains null byte")?;
+                    let c_options = root_options
+                        .as_ref()
+                        .map(|value| CString::new(value.as_str()))
+                        .transpose()
+                        .context("root options contains null byte")?;
+
+                    let fstype_ptr = c_fstype
+                        .as_ref()
+                        .map_or(std::ptr::null(), |value| value.as_ptr());
+                    let options_ptr = c_options
+                        .as_ref()
+                        .map_or(std::ptr::null(), |value| value.as_ptr());
+
+                    call_krun(
+                        unsafe {
+                            set_root_disk_remount(
+                                ctx_id,
+                                c_device.as_ptr(),
+                                fstype_ptr,
+                                options_ptr,
+                            )
+                        },
+                        "krun_set_root_disk_remount",
+                    )?;
+                }
+            }
 
             for (tag, host_path) in &spec.virtiofs_mounts {
                 let c_tag = CString::new(tag.as_str())
@@ -122,13 +238,13 @@ impl LibKrun {
             )?;
 
             let workdir =
-                CString::new(spec.exec.workdir.clone()).context("workdir contains null byte")?;
+                CString::new(spec.exec.workdir.as_str()).context("workdir contains null byte")?;
             call_krun(
                 unsafe { (self.fns.set_workdir)(ctx_id, workdir.as_ptr()) },
                 "krun_set_workdir",
             )?;
 
-            let exec_path = CString::new(spec.exec.exec_path.clone())
+            let exec_path = CString::new(spec.exec.exec_path.as_str())
                 .context("exec path contains null byte")?;
             let argv = make_c_array(&spec.exec.argv).context("building argv failed")?;
             let env = make_c_array(&spec.exec.env).context("building env failed")?;
@@ -164,6 +280,14 @@ unsafe fn load_symbols(lib: &Library) -> Result<LibKrunFns> {
     let set_exec: Symbol<'_, KRunSetExecFn> = unsafe { lib.get(b"krun_set_exec") }?;
     let start_enter: Symbol<'_, KRunStartEnterFn> = unsafe { lib.get(b"krun_start_enter") }?;
 
+    let add_disk2 = unsafe { lib.get::<KRunAddDisk2Fn>(b"krun_add_disk2") }
+        .map(|symbol| *symbol)
+        .ok();
+    let set_root_disk_remount =
+        unsafe { lib.get::<KRunSetRootDiskRemountFn>(b"krun_set_root_disk_remount") }
+            .map(|symbol| *symbol)
+            .ok();
+
     Ok(LibKrunFns {
         create_ctx: *create_ctx,
         free_ctx: *free_ctx,
@@ -174,6 +298,8 @@ unsafe fn load_symbols(lib: &Library) -> Result<LibKrunFns> {
         set_workdir: *set_workdir,
         set_exec: *set_exec,
         start_enter: *start_enter,
+        add_disk2,
+        set_root_disk_remount,
     })
 }
 
@@ -217,7 +343,7 @@ fn call_krun(code: c_int, name: &str) -> Result<()> {
     if code == 0 {
         Ok(())
     } else {
-        Err(anyhow!("{} failed with {}", name, code))
+        Err(anyhow!("{name} failed with {code}"))
     }
 }
 

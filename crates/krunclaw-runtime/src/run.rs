@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use libkrun_sys::{ExecSpec, LibKrun, RunSpec};
+use libkrun_sys::{DiskImageFormat, ExecSpec, LibKrun, RootSpec, RunSpec};
 
 #[derive(Debug, Clone)]
 pub struct PublishSpec {
@@ -9,11 +9,23 @@ pub struct PublishSpec {
     pub guest_port: u16,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum DiskFormatArg {
+    Auto,
+    Raw,
+    Qcow2,
+    Vmdk,
+}
+
 #[derive(Debug, Clone)]
 pub struct RunConfig {
     pub cpus: u8,
     pub memory_mib: u32,
-    pub rootfs: PathBuf,
+    pub disk_image: PathBuf,
+    pub disk_format: DiskFormatArg,
+    pub root_device: String,
+    pub root_fstype: Option<String>,
+    pub root_options: Option<String>,
     pub workspace_dir: PathBuf,
     pub state_dir: PathBuf,
     pub gateway_port: u16,
@@ -42,8 +54,18 @@ pub fn parse_publish(publish: &str) -> Result<PublishSpec> {
     })
 }
 
+pub fn parse_disk_format(value: &str) -> Result<DiskFormatArg> {
+    match value.to_ascii_lowercase().as_str() {
+        "auto" => Ok(DiskFormatArg::Auto),
+        "raw" => Ok(DiskFormatArg::Raw),
+        "qcow2" | "qcow" => Ok(DiskFormatArg::Qcow2),
+        "vmdk" => Ok(DiskFormatArg::Vmdk),
+        other => bail!("unsupported disk format '{other}', expected auto|raw|qcow2|vmdk"),
+    }
+}
+
 pub fn build_run_spec(config: &RunConfig) -> Result<RunSpec> {
-    ensure_path_exists(&config.rootfs, "rootfs")?;
+    ensure_path_exists(&config.disk_image, "disk image")?;
     ensure_path_exists(&config.workspace_dir, "workspace")?;
 
     std::fs::create_dir_all(&config.state_dir).with_context(|| {
@@ -52,6 +74,8 @@ pub fn build_run_spec(config: &RunConfig) -> Result<RunSpec> {
             config.state_dir.display()
         )
     })?;
+
+    let disk_format = resolve_disk_format(config.disk_format, &config.disk_image)?;
 
     let mut port_map = vec![(config.gateway_port, config.gateway_port)];
     for publish in &config.additional_publish {
@@ -66,6 +90,24 @@ pub fn build_run_spec(config: &RunConfig) -> Result<RunSpec> {
 mkdir -p /workspace /root/.openclaw
 mount -t virtiofs workspace /workspace
 mount -t virtiofs state /root/.openclaw
+
+if ! command -v openclaw >/dev/null 2>&1; then
+  if ! command -v node >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y --no-install-recommends ca-certificates curl gnupg bash
+      curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      apt-get install -y --no-install-recommends nodejs
+    else
+      echo "error: node is missing and apt-get unavailable; cannot auto-install openclaw" >&2
+      exit 1
+    fi
+  fi
+
+  npm install -g openclaw@latest
+fi
+
 cat > {guest_config_path} <<'JSON'
 {{
   "agents": {{
@@ -78,6 +120,8 @@ cat > {guest_config_path} <<'JSON'
   }}
 }}
 JSON
+
+export HOME=/root
 export OPENCLAW_CONFIG_PATH={guest_config_path}
 exec openclaw gateway --allow-unconfigured --port {gateway_port}
 "#,
@@ -99,7 +143,14 @@ exec openclaw gateway --allow-unconfigured --port {gateway_port}
     Ok(RunSpec {
         cpus: config.cpus,
         memory_mib: config.memory_mib,
-        rootfs: config.rootfs.display().to_string(),
+        root: RootSpec::DiskImage {
+            disk_path: config.disk_image.display().to_string(),
+            disk_format,
+            read_only: false,
+            root_device: config.root_device.clone(),
+            root_fstype: config.root_fstype.clone(),
+            root_options: config.root_options.clone(),
+        },
         virtiofs_mounts: vec![
             (
                 "workspace".to_string(),
@@ -116,6 +167,38 @@ pub fn run_openclaw(config: &RunConfig) -> Result<()> {
     let spec = build_run_spec(config)?;
     let krun = LibKrun::load().context("failed to load libkrun")?;
     krun.run(&spec)
+}
+
+fn resolve_disk_format(format: DiskFormatArg, disk_path: &Path) -> Result<DiskImageFormat> {
+    match format {
+        DiskFormatArg::Raw => Ok(DiskImageFormat::Raw),
+        DiskFormatArg::Qcow2 => Ok(DiskImageFormat::Qcow2),
+        DiskFormatArg::Vmdk => Ok(DiskImageFormat::Vmdk),
+        DiskFormatArg::Auto => guess_disk_format(disk_path),
+    }
+}
+
+fn guess_disk_format(disk_path: &Path) -> Result<DiskImageFormat> {
+    let name = disk_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if name.ends_with(".qcow2") || name.ends_with(".img") {
+        return Ok(DiskImageFormat::Qcow2);
+    }
+    if name.ends_with(".vmdk") {
+        return Ok(DiskImageFormat::Vmdk);
+    }
+    if name.ends_with(".raw") {
+        return Ok(DiskImageFormat::Raw);
+    }
+
+    bail!(
+        "cannot auto-detect disk format from '{}'; pass --disk-format explicitly",
+        disk_path.display()
+    )
 }
 
 fn ensure_path_exists(path: &Path, label: &str) -> Result<()> {
@@ -141,5 +224,16 @@ mod tests {
     fn publish_parser_rejects_invalid() {
         let error = parse_publish("18793").expect_err("publish should fail");
         assert!(error.to_string().contains("invalid publish format"));
+    }
+
+    #[test]
+    fn disk_format_parser_accepts_known_values() {
+        assert!(matches!(parse_disk_format("auto"), Ok(DiskFormatArg::Auto)));
+        assert!(matches!(parse_disk_format("raw"), Ok(DiskFormatArg::Raw)));
+        assert!(matches!(
+            parse_disk_format("qcow2"),
+            Ok(DiskFormatArg::Qcow2)
+        ));
+        assert!(matches!(parse_disk_format("vmdk"), Ok(DiskFormatArg::Vmdk)));
     }
 }

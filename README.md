@@ -4,13 +4,13 @@ Run full OpenClaw inside a lightweight VM powered by libkrun.
 
 ## Current milestone status
 
-This repository is at an early implementation milestone:
+This repository is in active development:
 
 - RFC drafted in `rfc/001-initial-design.md`
 - Rust workspace scaffolded
 - `krunclaw` CLI commands present: `run`, `image`, `doctor`
 - integration smoke script added: `integration/001-basic.sh`
-- image build/import flow is still a placeholder
+- disk-image flow supports Ubuntu community cloud images (Lima-template style)
 
 ## Build
 
@@ -18,35 +18,78 @@ This repository is at an early implementation milestone:
 cargo build --bin krunclaw
 ```
 
-## CLI examples
+## Image workflow (community Ubuntu images)
 
-Inspect image rootfs location:
+Inspect where disk image is expected:
 
 ```bash
 cargo run --bin krunclaw -- image inspect --image default
 ```
 
-Doctor check:
+Fetch Ubuntu 24.04 cloud image (auto-arch, Lima-template style source):
+
+```bash
+cargo run --bin krunclaw -- image fetch --image default
+```
+
+Fetch by specific Ubuntu release date (example follows your style):
+
+```bash
+cargo run --bin krunclaw -- image fetch --image default --ubuntu-date 20260108
+```
+
+Fetch from explicit URL:
+
+```bash
+cargo run --bin krunclaw -- image fetch --image default \
+  --url https://cloud-images.ubuntu.com/noble/20260108/noble-server-cloudimg-amd64.img
+```
+
+## Doctor
 
 ```bash
 cargo run --bin krunclaw -- doctor --image default
 ```
 
-Run (requires existing rootfs and libkrun installed):
+## Run
+
+Run using fetched disk image:
 
 ```bash
 cargo run --bin krunclaw -- run --image default --port 18789 --publish 18793:18793
 ```
 
+Run with explicit disk and format:
+
+```bash
+cargo run --bin krunclaw -- run \
+  --disk ~/.cache/krunclaw/images/default/disk.img \
+  --disk-format qcow2 \
+  --root-device /dev/vda1
+```
+
+For first boot convenience, `run` can auto-fetch if missing:
+
+```bash
+cargo run --bin krunclaw -- run --image default --auto-fetch-image
+```
+
 ## Integration smoke script
+
+Basic CLI/doctor smoke:
 
 ```bash
 integration/001-basic.sh
 ```
 
-To enable the runtime probe stage:
+Fetch image then run:
 
 ```bash
-INTEGRATION_ENABLE_RUN=1 integration/001-basic.sh
+INTEGRATION_FETCH_IMAGE=1 INTEGRATION_ENABLE_RUN=1 integration/001-basic.sh
 ```
 
+Use a specific Ubuntu daily/release date path pattern:
+
+```bash
+INTEGRATION_FETCH_IMAGE=1 INTEGRATION_UBUNTU_DATE=20260108 integration/001-basic.sh
+```
