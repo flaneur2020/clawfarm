@@ -1,291 +1,349 @@
-# RFC 001 — Initial Design for `krunclaw`
+# RFC 001 — Initial Design for `vclaw` (formerly `krunclaw`)
 
 - **Status:** Draft
 - **Date:** 2026-02-08
-- **Project:** `krunclaw`
+- **Project:** `vclaw`
 
 ## 1. Summary
 
-`krunclaw` is a Rust CLI that launches **full OpenClaw runtime components** inside a lightweight VM powered by `libkrun`.
+`vclaw` runs the **full OpenClaw components** inside a macOS lightweight VM using the Apple Virtualization framework via `github.com/Code-Hex/vz`.
 
-This design targets more than only `openclaw gateway`. It includes:
+This RFC updates earlier `libkrun` assumptions and aligns with the current README direction:
 
-1. Gateway daemon and WS/HTTP control plane.
-2. Control UI + web surfaces served by the gateway.
-3. Canvas host surface used by node/web features.
-4. Channels/plugin runtime loaded by OpenClaw config.
-5. Skills/hooks/plugin loading from workspace + state.
-6. Mounting the caller's current folder into the guest at every run.
+```bash
+vclaw image ls
+vclaw image fetch ubuntu:24.04
+vclaw run ubuntu:24.04 --workspace=.
+vclaw ps
+vclaw suspend <CLAWID>
+vclaw rm <CLAWID>
+```
 
 ## 2. Goals
 
-- **G1:** `krunclaw run` starts OpenClaw in VM with full component parity (not gateway-only mode).
-- **G2:** Host current directory (`$PWD`) is mounted inside guest and used as OpenClaw workspace.
-- **G3:** Host can reach OpenClaw service ports through `libkrun` port mapping.
-- **G4:** Reproducible image build path for Ubuntu or another Linux distro.
-- **G5:** Keep host installation lightweight: primary dependency is `libkrun` + `libkrunfw`.
+- **G1:** Boot full OpenClaw runtime in VM (not gateway-only).
+- **G2:** Mount host current folder into guest on each `vclaw run`.
+- **G3:** Expose OpenClaw service ports on host loopback (gateway + optional extras).
+- **G4:** Reuse Ubuntu community cloud images instead of building a custom base image first.
+- **G5:** Keep implementation in Go, directly against `Code-Hex/vz`.
 
-## 3. Non-goals (RFC-001 scope)
+## 3. Non-goals (RFC-001)
 
-- Full multi-VM orchestration.
-- Defaulting to `virtio-net + passt/gvproxy` (TSI first).
-- Production-grade multi-tenant hard isolation model.
-- Automatically provisioning third-party channel credentials/secrets.
-- Shipping desktop wrapper apps (e.g., platform-native GUI packaging).
+- Cross-platform hypervisor support beyond macOS Virtualization.framework.
+- Full orchestration (clusters, schedulers, multi-tenant control-plane).
+- Production hardening beyond single-user local development.
+- Cloud-init abstraction layer for multiple distros (can be expanded later).
 
-## 4. Key upstream constraints (driving decisions)
+## 4. Key constraints and implications
 
-### 4.1 libkrun networking
+### 4.1 Virtualization API / `Code-Hex/vz`
 
-- If no explicit network interface is added, `libkrun` uses TSI (`virtio-vsock + TSI`) networking.
-- `krun_set_port_map()` accepts `"host_port:guest_port"` strings.
-- Port mapping is not supported when passt mode is used.
+- Requires macOS virtualization entitlement (`com.apple.security.virtualization`) for built binaries.
+- `Code-Hex/vz` major version is tied to Go toolchain level (for example, `vz/v2` requires Go >= 1.17; newer majors can require newer Go).
+- Linux boot path uses explicit kernel + initrd + block storage attachment.
+- Virtio-fs directory sharing is required for workspace/state mounts.
+- NAT networking is available, but **direct host port mapping API is not equivalent to libkrun port-map**.
 
-### 4.2 libkrun filesystem
+### 4.2 Disk format reality
 
-- Root filesystem can be set from a host directory with `krun_set_root()`.
-- Additional host directories can be exposed with `krun_add_virtiofs(tag, path)`.
-- `krun_set_mapped_volumes()` is no longer supported.
+- `vz` block attachment expects raw disk images for guest writable root disk usage.
+- Ubuntu cloud images are often qcow2-formatted `.img`; conversion to raw may be required.
+- We standardize cached runtime disks as `raw` to avoid ambiguity.
 
 ### 4.3 OpenClaw runtime model
 
-- OpenClaw requires Node.js >= 22.
-- Gateway port defaults to `18789`, multiplexing WebSocket + HTTP surfaces.
-- Canvas host is a separate HTTP listener (commonly `gateway.port + 4`).
-- Full behavior depends on config + state (`~/.openclaw`-style data) and workspace files.
+- OpenClaw depends on Node.js 22+.
+- Full behavior requires gateway + UI surfaces + plugins/channels/hooks/state.
+- Per user requirement, OpenClaw process runs as **root inside guest**.
 
-### 4.4 Component realism
+## 5. Architecture overview
 
-- Some channel features require extra OS packages/binaries (example: optional channel-specific tools).
-- RFC-001 defines a **full components baseline** and a path for optional feature package layers.
+`vclaw` is split into five modules:
 
-## 5. High-level architecture
+1. **CLI layer**: command parsing and UX (`run`, `image`, `ps`, `suspend`, `rm`).
+2. **Image manager**: fetch/cache Ubuntu kernel+initrd+base image, convert/prepare raw disk.
+3. **VM runtime (vz backend)**: build VM config/devices and lifecycle control.
+4. **Guest bootstrap**: cloud-init + startup script to install/start full OpenClaw stack.
+5. **Forwarding + state manager**: workspace/state mounts, host port exposure, metadata persistence.
 
-`krunclaw` has five modules:
+## 6. Image strategy (community Ubuntu first)
 
-1. **CLI layer** (`clap`): parse commands/flags.
-2. **Image manager:** build/pull/export rootfs containing full OpenClaw runtime.
-3. **VM launcher (libkrun FFI):** configure VM, mounts, ports, and guest entrypoint.
-4. **Guest bootstrap/orchestrator:** mount virtio-fs tags, materialize config/env, start OpenClaw.
-5. **Runtime state manager:** host paths for image cache, persistent state, logs, and workspace mount.
+### 6.1 Source
 
-## 6. Base image strategy
+Primary image source is Ubuntu cloud images (Lima-style source policy), e.g. `ubuntu:24.04` (Noble), including date-pinned variants when specified.
 
-### 6.1 Distro choice
+Examples:
 
-- **Default proposal:** Debian Bookworm (aligns with current OpenClaw Docker base).
-- **Supported alternatives:** Ubuntu (or other distro) via configurable recipe.
+- Release:
+  - `https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-<arch>.img`
+  - `https://cloud-images.ubuntu.com/releases/noble/release/unpacked/ubuntu-24.04-server-cloudimg-<arch>-vmlinuz-generic`
+  - `https://cloud-images.ubuntu.com/releases/noble/release/unpacked/ubuntu-24.04-server-cloudimg-<arch>-initrd-generic`
+- Date-pinned:
+  - `https://cloud-images.ubuntu.com/noble/<date>/noble-server-cloudimg-<arch>.img`
+  - `https://cloud-images.ubuntu.com/noble/<date>/unpacked/noble-server-cloudimg-<arch>-vmlinuz-generic`
+  - `https://cloud-images.ubuntu.com/noble/<date>/unpacked/noble-server-cloudimg-<arch>-initrd-generic`
 
-### 6.2 Build method (v1)
+### 6.2 Cache layout (proposal)
 
-Build an OCI image, then export to a rootfs directory used by `krun_set_root()`.
+- `~/.cache/vclaw/images/<name>/kernel`
+- `~/.cache/vclaw/images/<name>/initrd`
+- `~/.cache/vclaw/images/<name>/base.img` (downloaded)
+- `~/.cache/vclaw/images/<name>/disk.raw` (runtime-ready)
 
-Pipeline:
+### 6.3 Conversion
 
-1. Build image with Node 22 + OpenClaw full package/install.
-2. `docker create` + `docker export` to tarball.
-3. Unpack tarball into local cache:
-   - `~/.cache/krunclaw/images/<image-id>/rootfs`
-4. Launch VM from cached rootfs.
-
-### 6.3 Guest image contents (full-components baseline)
-
-- Node.js 22 runtime.
-- OpenClaw CLI/runtime package (includes gateway + web assets expected by standard install).
-- `util-linux`, `bash`, `coreutils`, `ca-certificates`, `curl`, `git`.
-- Entrypoint helper (`/usr/local/bin/krunclaw-entrypoint`).
-- Runtime user is `root` (requirement for full OpenClaw permissions inside guest).
-
-### 6.4 Optional image flavors (future)
-
-- `core`: baseline full OpenClaw components.
-- `core+extras`: additional OS dependencies for channel/tool-heavy environments.
-
-## 7. Command UX (initial)
+If source image is qcow2, convert once:
 
 ```bash
-krunclaw run [--port 18789] [--publish 18793:18793] [--cpus 2] [--memory-mib 2048] [--image default]
+qemu-img convert -p -f qcow2 -O raw base.img disk.raw
 ```
 
-Planned utility commands:
+## 7. VM runtime flow (`vclaw run`)
+
+1. Resolve image ref (`ubuntu:24.04`) and host `--workspace` path.
+2. Ensure kernel/initrd/disk files exist and are architecture-compatible.
+3. Materialize instance directory: `~/.local/share/vclaw/instances/<clawid>/`.
+4. Generate cloud-init seed (user-data + meta-data) ISO.
+5. Configure VM with `Code-Hex/vz`:
+   - Linux boot loader (`kernel`, `initrd`, cmdline)
+   - Virtio block device (`disk.raw`)
+   - NAT network device
+   - Virtio-fs mounts (`workspace`, `state`)
+   - serial console
+   - optional vsock device (for port-forward strategy)
+6. Boot VM and wait for readiness (cloud-init/bootstrap signal).
+7. Start/attach host forwarding for requested ports.
+8. Persist runtime metadata for `ps` / `suspend` / `rm`.
+
+## 8. Guest bootstrap (full OpenClaw components)
+
+Guest bootstrap responsibilities:
+
+1. Mount shared paths:
+   - `/workspace` from host `--workspace` (default current folder)
+   - `/root/.openclaw` from host persistent state dir
+2. Install runtime dependencies if missing:
+   - Node.js 22
+   - OpenClaw package (`openclaw@latest` or pinned)
+3. Materialize OpenClaw config with workspace + gateway defaults.
+4. Start full OpenClaw runtime (gateway/UI/canvas/plugins/channels as configured).
+
+Root-mode behavior:
+
+- OpenClaw runs as root in guest to satisfy permission expectations for full component behavior.
+
+## 9. Networking and port exposure
+
+### 9.1 Requirement
+
+- Host must access OpenClaw gateway (default `18789`), plus optional mapped ports (example canvas `18793`).
+
+### 9.2 Design direction
+
+Because direct libkrun-style `host:guest` mapping is not available in VZ API, v1 uses a deterministic forwarding layer:
+
+- Default: host loopback listeners (`127.0.0.1:<hostPort>`).
+- Forwarding backend options:
+  - vsock-based proxy bridge (preferred), or
+  - helper tunnel process strategy.
+
+CLI surface remains simple:
+
+- `--port <gatewayHostPort>`
+- repeated `--publish host:guest`
+
+## 10. Command UX (aligned with README)
 
 ```bash
-krunclaw image build [--distro debian|ubuntu|other]
-krunclaw image list
-krunclaw openclaw <args...>   # run openclaw CLI inside VM context
-krunclaw doctor
+vclaw image ls
+vclaw image fetch ubuntu:24.04
+vclaw run ubuntu:24.04 --workspace=.
+vclaw ps
+vclaw suspend <CLAWID>
+vclaw rm <CLAWID>
 ```
 
-## 8. Runtime flow for `krunclaw run`
+Minimum command behavior:
 
-1. Resolve host `cwd = std::env::current_dir()`.
-2. Ensure chosen image/rootfs exists (build or pull policy).
-3. Prepare host runtime dirs:
-   - state: `~/.local/share/krunclaw/state/openclaw`
-   - logs: `~/.local/share/krunclaw/logs`
-4. Create libkrun context and set VM resources.
-5. `krun_set_root(ctx, <rootfs_dir>)`.
-6. `krun_add_virtiofs(ctx, "workspace", <cwd>)`.
-7. `krun_add_virtiofs(ctx, "state", <state_dir>)`.
-8. Configure TSI port mappings (gateway + explicit publishes).
-9. Set guest executable to `/usr/local/bin/krunclaw-entrypoint`.
-10. Start VM via `krun_start_enter(ctx)`.
+- `image ls`: show locally cached image refs and readiness.
+- `image fetch <ref>`: fetch kernel/initrd/base and prepare raw runtime disk.
+- `run <ref>`: start instance and print endpoints + CLAWID.
+- `ps`: list instances and states.
+- `suspend <id>`: stop or pause instance lifecycle safely.
+- `rm <id>`: remove instance runtime metadata (and optional disk artifacts).
 
-## 9. Full OpenClaw component coverage (required)
+## 11. State, mounts, and directories
 
-RFC-001 runtime target is to launch OpenClaw so these components are usable:
+- Image cache: `~/.cache/vclaw/images`
+- Instance metadata/logs: `~/.local/share/vclaw/instances`
+- Host mounted workspace: from `--workspace` (default current directory)
+- Host mounted OpenClaw state: per-instance persistent directory
 
-1. **Gateway daemon** (`openclaw gateway`) with WS + HTTP API.
-2. **Control UI/web surfaces** served on gateway HTTP port.
-3. **Canvas host** listener (when enabled by config).
-4. **Channels runtime** (WhatsApp/Telegram/Slack/Discord/etc.) as configured.
-5. **Hooks/skills/plugins** loaded from mounted workspace/state.
-6. **Node connectivity** (`role: node`) via gateway WS.
-7. **CLI operations** via helper command (`krunclaw openclaw ...`) in same VM/state context.
+## 12. Validation plan
 
-## 10. Mounting current folder (required behavior)
+### 12.1 Integration baseline
 
-On every `krunclaw run`:
+`integration/001-basic.sh` should execute a **real VM path** by default:
 
-- Host current folder is exposed as virtio-fs tag `workspace`.
-- Guest mounts it to `/workspace`.
-- OpenClaw workspace resolves to `/workspace`.
+1. Verify binary and command entrypoints.
+2. Ensure image available (fetch if needed).
+3. Execute `vclaw run ...`.
+4. Probe `http://127.0.0.1:<gatewayPort>/` readiness.
+5. Fail with useful logs on timeout.
 
-State handling for full components:
+### 12.2 Acceptance checks
 
-- Host persistent state dir is exposed as virtio-fs tag `state`.
-- Guest mounts it to `/root/.openclaw` (OpenClaw runs as root in guest).
-- This preserves config, credentials, pairing state, sessions, and channel runtime data across runs.
+- Workspace mount visible inside guest/OpenClaw operations.
+- Full OpenClaw surface available (not gateway-only shortcut).
+- Port mapping reachable on host loopback.
+- Restart preserves state in mounted guest root state path.
 
-Guest entrypoint responsibilities:
+## 13. Risks and mitigations
 
-1. `mount -t virtiofs workspace /workspace`
-2. `mount -t virtiofs state /root/.openclaw`
-3. Materialize/update config defaults:
-   - `agents.defaults.workspace = "/workspace"`
-   - `gateway.port = <GATEWAY_PORT>`
-4. Start OpenClaw with full runtime defaults (not stripped gateway-only profile).
+- **R1: Missing entitlements/codesign for virtualization**  
+  Mitigation: `doctor` checks and explicit troubleshooting output.
+- **R2: Cloud image format mismatch (qcow2 vs raw)**  
+  Mitigation: normalize to raw in cache; verify via tooling before boot.
+- **R3: Port mapping complexity under VZ NAT**  
+  Mitigation: stable forwarding layer with explicit tests.
+- **R4: First-boot bootstrap latency**  
+  Mitigation: cache runtime disk; avoid reinstall on every start.
+- **R5: Root in guest + writable mounts**  
+  Mitigation: document trust model, minimize mounted host paths.
 
-## 11. Networking and port exposure
+## 14. Implementation milestones
 
-### 11.1 Default network mode
-
-- Use TSI default (do **not** add explicit net devices in v1).
-- Keeps runtime simple and compatible with `krun_set_port_map`.
-
-### 11.2 Port mapping policy
-
-- Default published port: gateway `18789:18789`.
-- Additional ports can be declared with repeated `--publish host:guest`.
-- Recommended default extra mapping when canvas host enabled: `18793:18793`.
-
-### 11.3 Full-component implications
-
-- Gateway HTTP/WS remains primary control-plane port.
-- Channels requiring additional webhook/listener ports can be supported via explicit `--publish` entries.
-- v1 keeps passt disabled to retain native libkrun port-map semantics.
-
-### 11.4 Security default
-
-- Keep OpenClaw bind mode conservative (loopback-oriented guest config) unless user opts in.
-- Document that exposing mapped ports broadens host network surface.
-
-## 12. Implementation plan (phased)
-
-### Phase 0 — Bootstrap repository
-
-- Create Rust workspace and crates:
-  - `crates/krunclaw-cli`
-  - `crates/libkrun-sys`
-  - `crates/krunclaw-runtime`
-
-### Phase 1 — libkrun bring-up
-
-- Add minimal FFI bindings for required APIs.
-- Boot simple VM command and validate lifecycle/error paths.
-
-### Phase 2 — Image pipeline for full OpenClaw
-
-- Add image recipe(s) and `krunclaw image build`.
-- Cache keying: distro + OpenClaw version + image flavor.
-- Export/unpack rootfs flow.
-
-### Phase 3 — Guest bootstrap and mounts
-
-- Add `krunclaw-entrypoint` in image.
-- Wire `workspace` + persistent `state` virtio-fs mounts.
-- Start OpenClaw runtime from entrypoint with generated config/env.
-
-### Phase 4 — Component parity checks
-
-- Validate gateway WS/HTTP and Control UI serving.
-- Validate canvas host exposure.
-- Validate hooks/skills/plugins load from mounted workspace/state.
-- Validate channel runtime startup path from config.
-
-### Phase 5 — Port publishing and UX
-
-- Add `--port` and repeated `--publish` parsing.
-- Validate mappings for gateway + optional component ports.
-- Add `krunclaw openclaw <args...>` passthrough command.
-
-### Phase 6 — hardening and diagnostics
-
-- Add `krunclaw doctor` preflight checks.
-- Improve logging, shutdown behavior, and recovery guidance.
-
-## 13. Validation plan
-
-### 13.1 Automated checks
-
-- Unit tests:
-  - CLI parsing (`--port`, `--publish`, image selection)
-  - path/state resolution
-  - image cache keying
-- Integration tests (where environment allows):
-  - boot VM and run OpenClaw
-  - verify `/workspace` mount in guest
-  - verify gateway HTTP/WS reachable through mapped port
-  - verify control UI static assets served
-  - verify state persistence across restart
-
-### 13.2 Manual acceptance test (MVP)
-
-1. In host folder `demo/`, run:
-   - `krunclaw run --port 18789 --publish 18793:18793`
-2. Open `http://127.0.0.1:18789/` and verify Control UI loads.
-3. Verify workspace-backed behavior (files in `demo/` visible via OpenClaw workspace operations).
-4. Restart `krunclaw run` and confirm config/session state persisted.
-
-## 14. Risks and mitigations
-
-- **R1: virtio-fs host exposure risk**
-  - Mitigation: mount only explicit paths (`cwd`, state dir) and document trust model.
-- **R2: full-component dependency gaps per channel**
-  - Mitigation: baseline + optional image flavors; clear diagnostics for missing deps.
-- **R3: multi-port complexity for channel webhooks/canvas**
-  - Mitigation: explicit `--publish` model with sensible defaults.
-- **R4: image size and cold-start latency**
-  - Mitigation: cached rootfs and pinned image versions.
-- **R5: host dependency mismatch (`libkrun`/`libkrunfw`)**
-  - Mitigation: `doctor` with actionable checks.
-- **R6: OpenClaw runs as root inside guest**
-  - Mitigation: keep host mounts minimal, default to explicit mount allowlist only, and add a future hardening mode for read-only mounts and reduced guest privileges.
+1. **M1 — CLI skeleton in Go** (`run`, `image`, `ps`, `suspend`, `rm`).
+2. **M2 — Image fetch/cache/convert** for Ubuntu cloud artifacts.
+3. **M3 — VZ boot + mounts** (`workspace`, persistent state).
+4. **M4 — Bootstrap full OpenClaw** in guest startup script.
+5. **M5 — Host port forwarding** for gateway + `--publish`.
+6. **M6 — Lifecycle + integration hardening** (`ps`, `suspend`, `rm`, script coverage).
 
 ## 15. Open questions
 
-1. Default distro for v1 image: Debian, Ubuntu, or user-selected at first run?
-2. Auto-build image on first run vs fail-fast with explicit `image build`?
-3. Which additional ports should be auto-published by default besides gateway?
-4. Should v1 enforce gateway auth token/password by default?
-5. Which optional channel dependencies belong in `core+extras` flavor?
+1. Should `suspend` map to pause or graceful stop in v1 semantics?
+2. Should `image fetch` pin by date by default or follow latest release URL?
+3. What is the exact default published port set beyond gateway?
+4. Should first boot always install `openclaw@latest` or pin a tested version?
 
-## 16. MVP deliverable definition
+## 16. MVP definition
 
 MVP is complete when:
 
-1. `krunclaw run` boots OpenClaw in libkrun VM with full runtime components enabled.
-2. Current host folder is mounted and used as guest workspace.
-3. Persistent state survives VM restarts.
-4. Host reaches gateway/control UI via mapped port(s).
-5. Build instructions exist for Ubuntu or another Linux distro image recipe.
+1. `vclaw run ubuntu:24.04 --workspace=.` boots VM via `Code-Hex/vz`.
+2. Full OpenClaw components start (not gateway-only profile).
+3. Host current folder is mounted and used as workspace.
+4. Gateway is reachable from host on mapped loopback port.
+5. `vclaw ps`, `vclaw suspend`, and `vclaw rm` operate on created instances.
+
+## 17. Appendix — VZ knowledge dump (`Code-Hex/vz`)
+
+This appendix captures implementation-relevant knowledge for the `vclaw` VZ backend.
+
+### 17.1 OS / toolchain / entitlement matrix
+
+- Virtualization.framework requires macOS support and a signed binary entitlement:
+  - `com.apple.security.virtualization`
+- If bridged networking is used, add:
+  - `com.apple.vm.networking`
+- `Code-Hex/vz` major versions track Go/runtime expectations:
+  - `vz/v2` is practical with older Go toolchains (Go 1.17+)
+  - newer majors can require newer Go versions and newer SDK assumptions
+
+### 17.2 Linux VM boot model in VZ
+
+- Linux boot is configured explicitly with:
+  - kernel (`vmlinuz`)
+  - initrd
+  - kernel cmdline
+- Typical bootloader setup uses `NewLinuxBootLoader(...)` + `WithInitrd(...)` + `WithCommandLine(...)`.
+- Kernel/initrd/image architecture must match host-supported virtualization path:
+  - `arm64` hosts should use `arm64` Ubuntu artifacts
+  - Intel hosts should use `amd64` artifacts
+
+### 17.3 Storage model
+
+- VZ block device attachment (`DiskImageStorageDeviceAttachment`) is documented/implemented with raw disk image expectations.
+- Community Ubuntu images can be qcow2 despite `.img` naming; converting to raw in cache avoids runtime ambiguity.
+- Recommended cache policy:
+  - keep original downloaded artifact (`base.img`)
+  - maintain derived runtime disk (`disk.raw`)
+
+### 17.4 Filesystem sharing (virtio-fs)
+
+- Host folder sharing is done with `VirtioFileSystemDeviceConfiguration` + shared directory objects.
+- Guest mounts by tag, e.g.:
+  - `mount -t virtiofs workspace /workspace`
+- This is the required mechanism for:
+  - workspace mount
+  - persistent OpenClaw state mount
+- Security implication: writable shared dirs effectively grant guest process write access to host paths.
+
+### 17.5 Networking reality in VZ
+
+- NAT attachment is straightforward (`NewNATNetworkDeviceAttachment`), but this does **not** provide libkrun-style direct host-port mapping API.
+- Bridged networking requires extra entitlement and is not default for local-dev UX.
+- Therefore `vclaw` needs its own host exposure layer for `--port`/`--publish`, such as:
+  - vsock-based proxy, or
+  - helper tunnel/forwarder process.
+
+### 17.6 Virtio socket capability (important)
+
+- VZ can expose a virtio socket device.
+- Host side can open listener/connect flows through the VM’s socket device APIs.
+- This provides a solid foundation for deterministic port forwarding without relying on external VM managers.
+
+### 17.7 Console and observability
+
+- Serial console can be attached to stdio or log files via file-handle serial attachments.
+- For early bring-up and cloud-init diagnostics, serial output should be captured into per-instance logs.
+- Keep a concise health timeline in instance metadata:
+  - created → booting → running → ready → stopping/stopped.
+
+### 17.8 VM lifecycle semantics
+
+- Always run `config.Validate()` before VM creation/start to fail fast with actionable errors.
+- Lifecycle methods include:
+  - `Start`
+  - `RequestStop` (graceful guest-triggered)
+  - `Stop` (forceful)
+- State-change notifications should drive:
+  - `ps` output
+  - readiness waiting logic
+  - cleanup behavior on failure.
+
+### 17.9 Cloud-init seed strategy
+
+- For Ubuntu cloud images, NoCloud seed (`user-data`, `meta-data`) can be generated as an ISO (label `cidata`).
+- On macOS hosts this can be created with `hdiutil makehybrid`.
+- Seed should contain:
+  - one-time provisioning script
+  - bootstrap script path/unit for OpenClaw startup
+  - instance identifier for reproducibility
+
+### 17.10 OpenClaw-specific practical notes
+
+- First boot should be idempotent:
+  - install Node/OpenClaw only if missing
+  - write config only if absent or explicitly regenerate
+- Run OpenClaw as root inside guest (as requested), but keep host mounts minimal.
+- Default endpoint contract:
+  - gateway: `127.0.0.1:18789`
+  - optional canvas mapping can be exposed via `--publish`.
+
+### 17.11 Failure patterns to handle explicitly
+
+- Missing entitlements/codesign → virtualization init/validation failure.
+- Mismatched architecture artifacts → boot failure or invalid config.
+- Non-raw disk fed to VZ block attachment → attach/start failure.
+- Forwarding process crash while VM is alive → service appears down though VM is running.
+- Guest bootstrap succeeded partially → gateway unavailable despite VM `Running` state.
+
+### 17.12 Recommended `doctor` checks (future)
+
+- Host OS version and architecture.
+- Presence of virtualization entitlement on built binary.
+- Availability of required image artifacts (`kernel`, `initrd`, `disk.raw`).
+- Ability to create/start minimal VZ config (lightweight preflight).
+- Port forwarding backend readiness.
