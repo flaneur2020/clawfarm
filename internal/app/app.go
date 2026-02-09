@@ -34,15 +34,20 @@ const (
 type App struct {
 	out     io.Writer
 	errOut  io.Writer
+	in      io.Reader
 	backend vm.Backend
 }
 
 func New(out io.Writer, errOut io.Writer) *App {
-	return NewWithBackend(out, errOut, vm.NewQEMUBackend(out))
+	return NewWithIOAndBackend(out, errOut, os.Stdin, vm.NewQEMUBackend(out))
 }
 
 func NewWithBackend(out io.Writer, errOut io.Writer, backend vm.Backend) *App {
-	return &App{out: out, errOut: errOut, backend: backend}
+	return NewWithIOAndBackend(out, errOut, nil, backend)
+}
+
+func NewWithIOAndBackend(out io.Writer, errOut io.Writer, in io.Reader, backend vm.Backend) *App {
+	return &App{out: out, errOut: errOut, in: in, backend: backend}
 }
 
 func (a *App) Run(args []string) error {
@@ -149,6 +154,18 @@ func (a *App) runRun(args []string) error {
 	openClawGatewayAuthMode := ""
 	openClawGatewayToken := ""
 	openClawGatewayPassword := ""
+	openClawOpenAIAPIKey := ""
+	openClawAnthropicAPIKey := ""
+	openClawGoogleGenerativeAIAPIKey := ""
+	openClawXAIAPIKey := ""
+	openClawOpenRouterAPIKey := ""
+	openClawZAIAPIKey := ""
+	openClawDiscordToken := ""
+	openClawTelegramToken := ""
+	openClawWhatsAppPhoneNumberID := ""
+	openClawWhatsAppAccessToken := ""
+	openClawWhatsAppVerifyToken := ""
+	openClawWhatsAppAppSecret := ""
 	var published portList
 	var openClawEnvironment envVarList
 
@@ -167,6 +184,18 @@ func (a *App) runRun(args []string) error {
 	flags.StringVar(&openClawGatewayAuthMode, "openclaw-gateway-auth-mode", "", "OpenClaw gateway.auth.mode (token|password|none)")
 	flags.StringVar(&openClawGatewayToken, "openclaw-gateway-token", "", "OpenClaw gateway token (maps to OPENCLAW_GATEWAY_TOKEN)")
 	flags.StringVar(&openClawGatewayPassword, "openclaw-gateway-password", "", "OpenClaw gateway password (maps to OPENCLAW_GATEWAY_PASSWORD)")
+	flags.StringVar(&openClawOpenAIAPIKey, "openclaw-openai-api-key", "", "OpenAI API key (maps to OPENAI_API_KEY)")
+	flags.StringVar(&openClawAnthropicAPIKey, "openclaw-anthropic-api-key", "", "Anthropic API key (maps to ANTHROPIC_API_KEY)")
+	flags.StringVar(&openClawGoogleGenerativeAIAPIKey, "openclaw-google-generative-ai-api-key", "", "Google Generative AI API key (maps to GOOGLE_GENERATIVE_AI_API_KEY)")
+	flags.StringVar(&openClawXAIAPIKey, "openclaw-xai-api-key", "", "xAI API key (maps to XAI_API_KEY)")
+	flags.StringVar(&openClawOpenRouterAPIKey, "openclaw-openrouter-api-key", "", "OpenRouter API key (maps to OPENROUTER_API_KEY)")
+	flags.StringVar(&openClawZAIAPIKey, "openclaw-zai-api-key", "", "Z.AI API key (maps to ZAI_API_KEY)")
+	flags.StringVar(&openClawDiscordToken, "openclaw-discord-token", "", "Discord token (maps to DISCORD_TOKEN)")
+	flags.StringVar(&openClawTelegramToken, "openclaw-telegram-token", "", "Telegram token (maps to TELEGRAM_TOKEN)")
+	flags.StringVar(&openClawWhatsAppPhoneNumberID, "openclaw-whatsapp-phone-number-id", "", "WhatsApp phone number id (maps to WHATSAPP_PHONE_NUMBER_ID)")
+	flags.StringVar(&openClawWhatsAppAccessToken, "openclaw-whatsapp-access-token", "", "WhatsApp access token (maps to WHATSAPP_ACCESS_TOKEN)")
+	flags.StringVar(&openClawWhatsAppVerifyToken, "openclaw-whatsapp-verify-token", "", "WhatsApp verify token (maps to WHATSAPP_VERIFY_TOKEN)")
+	flags.StringVar(&openClawWhatsAppAppSecret, "openclaw-whatsapp-app-secret", "", "WhatsApp app secret (maps to WHATSAPP_APP_SECRET)")
 	flags.Var(&openClawEnvironment, "openclaw-env", "OpenClaw env override KEY=VALUE (repeatable)")
 	flags.Var(&published, "publish", "host:guest mapping (repeatable)")
 	flags.Var(&published, "port-forward", "alias of --publish (repeatable)")
@@ -175,7 +204,7 @@ func (a *App) runRun(args []string) error {
 		return err
 	}
 	if flags.NArg() != 1 {
-		return errors.New("usage: vclaw run <ref> [--workspace=. --port=18789 --publish host:guest] [--openclaw-config path --openclaw-env-file path --openclaw-env KEY=VALUE]")
+		return errors.New("usage: vclaw run <ref> [--workspace=. --port=18789 --publish host:guest] [--openclaw-config path --openclaw-env-file path --openclaw-env KEY=VALUE] [--openclaw-openai-api-key ... --openclaw-discord-token ...]")
 	}
 	if gatewayPort < 1 || gatewayPort > 65535 {
 		return fmt.Errorf("invalid gateway port %d: expected 1-65535", gatewayPort)
@@ -226,11 +255,26 @@ func (a *App) runRun(args []string) error {
 	for key, value := range openClawEnvironment.Values {
 		openClawEnv[key] = value
 	}
-	if openClawGatewayToken != "" {
-		openClawEnv["OPENCLAW_GATEWAY_TOKEN"] = openClawGatewayToken
+	explicitEnv := map[string]string{
+		"OPENCLAW_GATEWAY_TOKEN":       openClawGatewayToken,
+		"OPENCLAW_GATEWAY_PASSWORD":    openClawGatewayPassword,
+		"OPENAI_API_KEY":               openClawOpenAIAPIKey,
+		"ANTHROPIC_API_KEY":            openClawAnthropicAPIKey,
+		"GOOGLE_GENERATIVE_AI_API_KEY": openClawGoogleGenerativeAIAPIKey,
+		"XAI_API_KEY":                  openClawXAIAPIKey,
+		"OPENROUTER_API_KEY":           openClawOpenRouterAPIKey,
+		"ZAI_API_KEY":                  openClawZAIAPIKey,
+		"DISCORD_TOKEN":                openClawDiscordToken,
+		"TELEGRAM_TOKEN":               openClawTelegramToken,
+		"WHATSAPP_PHONE_NUMBER_ID":     openClawWhatsAppPhoneNumberID,
+		"WHATSAPP_ACCESS_TOKEN":        openClawWhatsAppAccessToken,
+		"WHATSAPP_VERIFY_TOKEN":        openClawWhatsAppVerifyToken,
+		"WHATSAPP_APP_SECRET":          openClawWhatsAppAppSecret,
 	}
-	if openClawGatewayPassword != "" {
-		openClawEnv["OPENCLAW_GATEWAY_PASSWORD"] = openClawGatewayPassword
+	for key, value := range explicitEnv {
+		if value != "" {
+			openClawEnv[key] = value
+		}
 	}
 
 	manager, err := a.imageManager()
@@ -244,6 +288,11 @@ func (a *App) runRun(args []string) error {
 		if errors.Is(err, images.ErrImageNotFetched) {
 			return fmt.Errorf("image %s is not ready, run `vclaw image fetch %s` first", ref, ref)
 		}
+		return err
+	}
+
+	openClawConfig, err = a.preflightOpenClawInputs(openClawConfig, openClawEnv)
+	if err != nil {
 		return err
 	}
 
@@ -605,6 +654,11 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.out, "  vclaw run <ref> [--workspace=. --port=18789 --publish host:guest]")
 	fmt.Fprintln(a.out, "             [--openclaw-config path --openclaw-agent-workspace /workspace --openclaw-model-primary openai/gpt-5]")
 	fmt.Fprintln(a.out, "             [--openclaw-gateway-mode local --openclaw-gateway-auth-mode token --openclaw-gateway-token xxx]")
+	fmt.Fprintln(a.out, "             [--openclaw-openai-api-key xxx --openclaw-anthropic-api-key xxx --openclaw-openrouter-api-key xxx]")
+	fmt.Fprintln(a.out, "             [--openclaw-google-generative-ai-api-key xxx --openclaw-xai-api-key xxx --openclaw-zai-api-key xxx]")
+	fmt.Fprintln(a.out, "             [--openclaw-discord-token xxx --openclaw-telegram-token xxx]")
+	fmt.Fprintln(a.out, "             [--openclaw-whatsapp-phone-number-id xxx --openclaw-whatsapp-access-token xxx]")
+	fmt.Fprintln(a.out, "             [--openclaw-whatsapp-verify-token xxx --openclaw-whatsapp-app-secret xxx]")
 	fmt.Fprintln(a.out, "             [--openclaw-env-file path --openclaw-env KEY=VALUE]")
 	fmt.Fprintln(a.out, "  vclaw ps")
 	fmt.Fprintln(a.out, "  vclaw suspend <clawid>")
@@ -614,7 +668,7 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.out, "Examples:")
 	fmt.Fprintln(a.out, "  vclaw image fetch ubuntu:24.04")
 	fmt.Fprintln(a.out, "  vclaw run ubuntu:24.04 --workspace=. --publish 8080:80")
-	fmt.Fprintln(a.out, "  vclaw run ubuntu:24.04 --openclaw-env OPENAI_API_KEY=$OPENAI_API_KEY")
+	fmt.Fprintln(a.out, "  vclaw run ubuntu:24.04 --openclaw-openai-api-key $OPENAI_API_KEY --openclaw-discord-token $DISCORD_TOKEN")
 }
 
 type portList struct {
@@ -754,6 +808,272 @@ func ensureMapValue(root map[string]interface{}, key string) map[string]interfac
 	next := map[string]interface{}{}
 	root[key] = next
 	return next
+}
+
+type openClawRuntimeRequirements struct {
+	ModelPrimary    string
+	GatewayAuthMode string
+}
+
+func (a *App) preflightOpenClawInputs(openClawConfig string, openClawEnv map[string]string) (string, error) {
+	requirements, err := parseOpenClawRuntimeRequirements(openClawConfig)
+	if err != nil {
+		return "", err
+	}
+
+	canPrompt := a.canPromptForInput()
+	var reader *bufio.Reader
+	if canPrompt {
+		reader = bufio.NewReader(a.in)
+	}
+
+	modelPrimary := strings.TrimSpace(requirements.ModelPrimary)
+	if modelPrimary == "" {
+		modelPrimary, err = a.resolveRequiredInput(reader, canPrompt,
+			"OpenClaw primary model (provider/model, e.g. openai/gpt-5)",
+			"--openclaw-model-primary",
+			"")
+		if err != nil {
+			return "", err
+		}
+		openClawConfig, err = setOpenClawModelPrimary(openClawConfig, modelPrimary)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	providerEnvKey, providerLabel, err := providerEnvRequirementForModel(modelPrimary)
+	if err != nil {
+		return "", err
+	}
+	if providerEnvKey != "" && strings.TrimSpace(openClawEnv[providerEnvKey]) == "" {
+		flagHint := requiredFlagForEnvKey(providerEnvKey)
+		value, resolveErr := a.resolveRequiredInput(reader, canPrompt,
+			fmt.Sprintf("%s for model %s", providerLabel, modelPrimary),
+			flagHint,
+			providerEnvKey)
+		if resolveErr != nil {
+			return "", resolveErr
+		}
+		openClawEnv[providerEnvKey] = value
+	}
+
+	switch strings.ToLower(strings.TrimSpace(requirements.GatewayAuthMode)) {
+	case "", "none":
+	case "token":
+		if strings.TrimSpace(openClawEnv["OPENCLAW_GATEWAY_TOKEN"]) == "" {
+			value, resolveErr := a.resolveRequiredInput(reader, canPrompt,
+				"OpenClaw gateway token",
+				"--openclaw-gateway-token",
+				"OPENCLAW_GATEWAY_TOKEN")
+			if resolveErr != nil {
+				return "", resolveErr
+			}
+			openClawEnv["OPENCLAW_GATEWAY_TOKEN"] = value
+		}
+	case "password":
+		if strings.TrimSpace(openClawEnv["OPENCLAW_GATEWAY_PASSWORD"]) == "" {
+			value, resolveErr := a.resolveRequiredInput(reader, canPrompt,
+				"OpenClaw gateway password",
+				"--openclaw-gateway-password",
+				"OPENCLAW_GATEWAY_PASSWORD")
+			if resolveErr != nil {
+				return "", resolveErr
+			}
+			openClawEnv["OPENCLAW_GATEWAY_PASSWORD"] = value
+		}
+	default:
+		return "", fmt.Errorf("invalid gateway.auth.mode %q in OpenClaw config: expected token, password, or none", requirements.GatewayAuthMode)
+	}
+
+	whatsAppRequired := []struct {
+		envKey   string
+		flagName string
+		label    string
+	}{
+		{envKey: "WHATSAPP_PHONE_NUMBER_ID", flagName: "--openclaw-whatsapp-phone-number-id", label: "WhatsApp phone number id"},
+		{envKey: "WHATSAPP_ACCESS_TOKEN", flagName: "--openclaw-whatsapp-access-token", label: "WhatsApp access token"},
+		{envKey: "WHATSAPP_VERIFY_TOKEN", flagName: "--openclaw-whatsapp-verify-token", label: "WhatsApp verify token"},
+		{envKey: "WHATSAPP_APP_SECRET", flagName: "--openclaw-whatsapp-app-secret", label: "WhatsApp app secret"},
+	}
+
+	presentCount := 0
+	for _, item := range whatsAppRequired {
+		if strings.TrimSpace(openClawEnv[item.envKey]) != "" {
+			presentCount++
+		}
+	}
+	if presentCount > 0 && presentCount < len(whatsAppRequired) {
+		for _, item := range whatsAppRequired {
+			if strings.TrimSpace(openClawEnv[item.envKey]) != "" {
+				continue
+			}
+			value, resolveErr := a.resolveRequiredInput(reader, canPrompt, item.label, item.flagName, item.envKey)
+			if resolveErr != nil {
+				return "", resolveErr
+			}
+			openClawEnv[item.envKey] = value
+		}
+	}
+
+	return openClawConfig, nil
+}
+
+func (a *App) resolveRequiredInput(reader *bufio.Reader, canPrompt bool, label string, flagName string, envKey string) (string, error) {
+	if !canPrompt || reader == nil {
+		if envKey != "" {
+			return "", fmt.Errorf("missing required OpenClaw parameter: %s (set %s or --openclaw-env %s=...)", label, flagName, envKey)
+		}
+		return "", fmt.Errorf("missing required OpenClaw parameter: %s (set %s)", label, flagName)
+	}
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		fmt.Fprintf(a.out, "openclaw> %s: ", label)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return "", fmt.Errorf("read interactive input: %w", err)
+		}
+		value := strings.TrimSpace(line)
+		if value != "" {
+			return value, nil
+		}
+		fmt.Fprintf(a.errOut, "invalid value: %s cannot be empty\n", label)
+	}
+
+	if envKey != "" {
+		return "", fmt.Errorf("missing required OpenClaw parameter after 3 attempts: %s (set %s or --openclaw-env %s=...)", label, flagName, envKey)
+	}
+	return "", fmt.Errorf("missing required OpenClaw parameter after 3 attempts: %s (set %s)", label, flagName)
+}
+
+func (a *App) canPromptForInput() bool {
+	if a.in == nil {
+		return false
+	}
+	if file, ok := a.in.(*os.File); ok {
+		info, err := file.Stat()
+		if err != nil {
+			return false
+		}
+		return info.Mode()&os.ModeCharDevice != 0
+	}
+	return true
+}
+
+func parseOpenClawRuntimeRequirements(configPayload string) (openClawRuntimeRequirements, error) {
+	requirements := openClawRuntimeRequirements{}
+	if strings.TrimSpace(configPayload) == "" {
+		return requirements, nil
+	}
+
+	config := map[string]interface{}{}
+	if err := json.Unmarshal([]byte(configPayload), &config); err != nil {
+		return requirements, fmt.Errorf("parse generated OpenClaw config JSON: %w", err)
+	}
+	requirements.ModelPrimary = lookupNestedString(config, "agents", "defaults", "model", "primary")
+	requirements.GatewayAuthMode = lookupNestedString(config, "gateway", "auth", "mode")
+	return requirements, nil
+}
+
+func setOpenClawModelPrimary(configPayload string, modelPrimary string) (string, error) {
+	config := map[string]interface{}{}
+	if strings.TrimSpace(configPayload) != "" {
+		if err := json.Unmarshal([]byte(configPayload), &config); err != nil {
+			return "", fmt.Errorf("parse generated OpenClaw config JSON: %w", err)
+		}
+	}
+
+	agents := ensureMapValue(config, "agents")
+	defaults := ensureMapValue(agents, "defaults")
+	model := ensureMapValue(defaults, "model")
+	model["primary"] = modelPrimary
+
+	payload, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+func providerEnvRequirementForModel(modelPrimary string) (string, string, error) {
+	parts := strings.SplitN(strings.TrimSpace(modelPrimary), "/", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", "", fmt.Errorf("invalid --openclaw-model-primary %q: expected provider/model", modelPrimary)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(parts[0])) {
+	case "openai":
+		return "OPENAI_API_KEY", "OpenAI API key", nil
+	case "anthropic":
+		return "ANTHROPIC_API_KEY", "Anthropic API key", nil
+	case "gemini":
+		return "GOOGLE_GENERATIVE_AI_API_KEY", "Google Generative AI API key", nil
+	case "grok", "xai":
+		return "XAI_API_KEY", "xAI API key", nil
+	case "openrouter":
+		return "OPENROUTER_API_KEY", "OpenRouter API key", nil
+	case "zai":
+		return "ZAI_API_KEY", "Z.AI API key", nil
+	case "ollama", "lmstudio":
+		return "", "", nil
+	default:
+		return "", "", fmt.Errorf("unsupported model provider %q in --openclaw-model-primary %q; supported providers: openai, anthropic, gemini, grok, xai, openrouter, zai, ollama, lmstudio", parts[0], modelPrimary)
+	}
+}
+
+func requiredFlagForEnvKey(envKey string) string {
+	switch envKey {
+	case "OPENAI_API_KEY":
+		return "--openclaw-openai-api-key"
+	case "ANTHROPIC_API_KEY":
+		return "--openclaw-anthropic-api-key"
+	case "GOOGLE_GENERATIVE_AI_API_KEY":
+		return "--openclaw-google-generative-ai-api-key"
+	case "XAI_API_KEY":
+		return "--openclaw-xai-api-key"
+	case "OPENROUTER_API_KEY":
+		return "--openclaw-openrouter-api-key"
+	case "ZAI_API_KEY":
+		return "--openclaw-zai-api-key"
+	case "OPENCLAW_GATEWAY_TOKEN":
+		return "--openclaw-gateway-token"
+	case "OPENCLAW_GATEWAY_PASSWORD":
+		return "--openclaw-gateway-password"
+	case "DISCORD_TOKEN":
+		return "--openclaw-discord-token"
+	case "TELEGRAM_TOKEN":
+		return "--openclaw-telegram-token"
+	case "WHATSAPP_PHONE_NUMBER_ID":
+		return "--openclaw-whatsapp-phone-number-id"
+	case "WHATSAPP_ACCESS_TOKEN":
+		return "--openclaw-whatsapp-access-token"
+	case "WHATSAPP_VERIFY_TOKEN":
+		return "--openclaw-whatsapp-verify-token"
+	case "WHATSAPP_APP_SECRET":
+		return "--openclaw-whatsapp-app-secret"
+	default:
+		return "--openclaw-env"
+	}
+}
+
+func lookupNestedString(root map[string]interface{}, keys ...string) string {
+	current := interface{}(root)
+	for _, key := range keys {
+		nextMap, ok := current.(map[string]interface{})
+		if !ok {
+			return ""
+		}
+		next, exists := nextMap[key]
+		if !exists {
+			return ""
+		}
+		current = next
+	}
+	stringValue, ok := current.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(stringValue)
 }
 
 func parseOpenClawEnvFile(path string) (map[string]string, error) {

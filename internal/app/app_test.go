@@ -104,7 +104,7 @@ func TestRunFlowAndInstanceLifecycle(t *testing.T) {
 	var errOut bytes.Buffer
 	application := NewWithBackend(&out, &errOut, backend)
 
-	if err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--port=65531", "--publish", "8080:80", "--no-wait"}); err != nil {
+	if err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--port=65531", "--publish", "8080:80", "--no-wait", "--openclaw-model-primary", "openai/gpt-5", "--openclaw-openai-api-key", "test-key"}); err != nil {
 		t.Fatalf("run command failed: %v", err)
 	}
 	if !strings.Contains(out.String(), "CLAWID:") {
@@ -204,7 +204,7 @@ func TestRunWaitTimeout(t *testing.T) {
 	var errOut bytes.Buffer
 	application := NewWithBackend(&out, &errOut, backend)
 
-	err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--port=65530", "--ready-timeout-secs=1"})
+	err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--port=65530", "--ready-timeout-secs=1", "--openclaw-model-primary", "openai/gpt-5", "--openclaw-openai-api-key", "test-key"})
 	if err == nil {
 		t.Fatalf("expected timeout error")
 	}
@@ -290,7 +290,19 @@ func TestRunPassesExpandedOpenClawParameters(t *testing.T) {
 		"--openclaw-model-primary", "openai/gpt-5",
 		"--openclaw-gateway-auth-mode", "token",
 		"--openclaw-gateway-token", "token-from-flag",
-		"--openclaw-env", "OPENAI_API_KEY=flag-key",
+		"--openclaw-openai-api-key", "openai-from-flag",
+		"--openclaw-anthropic-api-key", "anthropic-from-flag",
+		"--openclaw-google-generative-ai-api-key", "google-from-flag",
+		"--openclaw-xai-api-key", "xai-from-flag",
+		"--openclaw-openrouter-api-key", "openrouter-from-flag",
+		"--openclaw-zai-api-key", "zai-from-flag",
+		"--openclaw-discord-token", "discord-from-flag",
+		"--openclaw-telegram-token", "telegram-from-flag",
+		"--openclaw-whatsapp-phone-number-id", "whatsapp-phone-id",
+		"--openclaw-whatsapp-access-token", "whatsapp-access-token",
+		"--openclaw-whatsapp-verify-token", "whatsapp-verify-token",
+		"--openclaw-whatsapp-app-secret", "whatsapp-app-secret",
+		"--openclaw-env", "OPENAI_API_KEY=from-openclaw-env",
 	})
 	if err != nil {
 		t.Fatalf("run command failed: %v", err)
@@ -306,14 +318,141 @@ func TestRunPassesExpandedOpenClawParameters(t *testing.T) {
 		t.Fatalf("missing auth mode in config: %s", backend.lastSpec.OpenClawConfig)
 	}
 
-	if backend.lastSpec.OpenClawEnvironment["OPENAI_API_KEY"] != "flag-key" {
-		t.Fatalf("expected flag to override env file key")
+	if backend.lastSpec.OpenClawEnvironment["OPENAI_API_KEY"] != "openai-from-flag" {
+		t.Fatalf("expected explicit OpenAI arg to override env file and --openclaw-env")
 	}
 	if backend.lastSpec.OpenClawEnvironment["OPENCLAW_GATEWAY_TOKEN"] != "token-from-flag" {
 		t.Fatalf("missing gateway token env")
 	}
-	if backend.lastSpec.OpenClawEnvironment["TELEGRAM_TOKEN"] != "file-telegram" {
-		t.Fatalf("missing env file token")
+	if backend.lastSpec.OpenClawEnvironment["ANTHROPIC_API_KEY"] != "anthropic-from-flag" {
+		t.Fatalf("missing Anthropic key env")
+	}
+	if backend.lastSpec.OpenClawEnvironment["GOOGLE_GENERATIVE_AI_API_KEY"] != "google-from-flag" {
+		t.Fatalf("missing Google key env")
+	}
+	if backend.lastSpec.OpenClawEnvironment["XAI_API_KEY"] != "xai-from-flag" {
+		t.Fatalf("missing xAI key env")
+	}
+	if backend.lastSpec.OpenClawEnvironment["OPENROUTER_API_KEY"] != "openrouter-from-flag" {
+		t.Fatalf("missing OpenRouter key env")
+	}
+	if backend.lastSpec.OpenClawEnvironment["ZAI_API_KEY"] != "zai-from-flag" {
+		t.Fatalf("missing Z.AI key env")
+	}
+	if backend.lastSpec.OpenClawEnvironment["DISCORD_TOKEN"] != "discord-from-flag" {
+		t.Fatalf("missing Discord token env")
+	}
+	if backend.lastSpec.OpenClawEnvironment["TELEGRAM_TOKEN"] != "telegram-from-flag" {
+		t.Fatalf("expected explicit Telegram arg to override env file")
+	}
+	if backend.lastSpec.OpenClawEnvironment["WHATSAPP_PHONE_NUMBER_ID"] != "whatsapp-phone-id" {
+		t.Fatalf("missing WhatsApp phone number id env")
+	}
+	if backend.lastSpec.OpenClawEnvironment["WHATSAPP_ACCESS_TOKEN"] != "whatsapp-access-token" {
+		t.Fatalf("missing WhatsApp access token env")
+	}
+	if backend.lastSpec.OpenClawEnvironment["WHATSAPP_VERIFY_TOKEN"] != "whatsapp-verify-token" {
+		t.Fatalf("missing WhatsApp verify token env")
+	}
+	if backend.lastSpec.OpenClawEnvironment["WHATSAPP_APP_SECRET"] != "whatsapp-app-secret" {
+		t.Fatalf("missing WhatsApp app secret env")
+	}
+}
+
+func TestRunFailsFastForMissingRequiredOpenClawParameters(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--no-wait"})
+	if err == nil {
+		t.Fatalf("expected missing parameter error")
+	}
+	if !strings.Contains(err.Error(), "--openclaw-model-primary") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if backend.nextPID != 4000 {
+		t.Fatalf("vm should not start before preflight validation")
+	}
+}
+
+func TestRunPromptsForMissingRequiredOpenClawParameters(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	input := strings.NewReader("openai/gpt-5\nprompt-openai-key\n")
+	application := NewWithIOAndBackend(&out, &errOut, input, backend)
+
+	err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--no-wait"})
+	if err != nil {
+		t.Fatalf("run should succeed with prompted values: %v", err)
+	}
+	if !strings.Contains(out.String(), "openclaw> OpenClaw primary model") {
+		t.Fatalf("missing model prompt output: %s", out.String())
+	}
+	if backend.lastSpec.OpenClawEnvironment["OPENAI_API_KEY"] != "prompt-openai-key" {
+		t.Fatalf("missing prompted OPENAI_API_KEY")
+	}
+	if !strings.Contains(backend.lastSpec.OpenClawConfig, `"primary": "openai/gpt-5"`) {
+		t.Fatalf("missing prompted primary model in config: %s", backend.lastSpec.OpenClawConfig)
+	}
+}
+
+func TestRunRejectsUnsupportedModelProvider(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--no-wait", "--openclaw-model-primary", "foo/bar"})
+	if err == nil {
+		t.Fatalf("expected unsupported provider error")
+	}
+	if !strings.Contains(err.Error(), "unsupported model provider") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if backend.nextPID != 4000 {
+		t.Fatalf("vm should not start for invalid model provider")
 	}
 }
 
@@ -336,7 +475,7 @@ func TestPSShowsUnhealthyStatusWhenGatewayUnavailable(t *testing.T) {
 	var errOut bytes.Buffer
 	application := NewWithBackend(&out, &errOut, backend)
 
-	err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--port=65531", "--ready-timeout-secs=1"})
+	err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--port=65531", "--ready-timeout-secs=1", "--openclaw-model-primary", "openai/gpt-5", "--openclaw-openai-api-key", "test-key"})
 	if err == nil {
 		t.Fatalf("expected run timeout error")
 	}

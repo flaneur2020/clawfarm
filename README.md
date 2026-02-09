@@ -74,6 +74,34 @@ vclaw run ubuntu:24.04 \
   --openclaw-env-file ./.env.openclaw
 ```
 
+Complete explicit OpenClaw provider/channel flags:
+
+```bash
+# AI provider keys
+--openclaw-openai-api-key
+--openclaw-anthropic-api-key
+--openclaw-google-generative-ai-api-key
+--openclaw-xai-api-key
+--openclaw-openrouter-api-key
+--openclaw-zai-api-key
+
+# Gateway auth
+--openclaw-gateway-token
+--openclaw-gateway-password
+
+# Channel tokens
+--openclaw-discord-token
+--openclaw-telegram-token
+--openclaw-whatsapp-phone-number-id
+--openclaw-whatsapp-access-token
+--openclaw-whatsapp-verify-token
+--openclaw-whatsapp-app-secret
+```
+
+Precedence for env values is: explicit provider/channel flags > `--openclaw-env` > `--openclaw-env-file`.
+
+`vclaw run` preflight validates required OpenClaw parameters before VM creation. If required values are missing and stdin is interactive, it prompts step-by-step in TUI style; in non-interactive mode it fails fast with actionable errors.
+
 ## Make targets
 
 ```bash
