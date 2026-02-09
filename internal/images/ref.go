@@ -7,6 +7,10 @@ import (
 	"strings"
 )
 
+func SupportedRefs() []string {
+	return []string{"ubuntu:24.04"}
+}
+
 type UbuntuRef struct {
 	Original string
 	Version  string
@@ -62,20 +66,6 @@ func (r UbuntuRef) BaseImageURL() string {
 		return fmt.Sprintf("https://cloud-images.ubuntu.com/releases/%s/release/ubuntu-%s-server-cloudimg-%s.img", r.Codename, r.Version, r.Arch)
 	}
 	return fmt.Sprintf("https://cloud-images.ubuntu.com/%s/%s/%s-server-cloudimg-%s.img", r.Codename, r.Date, r.Codename, r.Arch)
-}
-
-func (r UbuntuRef) KernelURL() string {
-	if r.Date == "" {
-		return fmt.Sprintf("https://cloud-images.ubuntu.com/releases/%s/release/unpacked/ubuntu-%s-server-cloudimg-%s-vmlinuz-generic", r.Codename, r.Version, r.Arch)
-	}
-	return fmt.Sprintf("https://cloud-images.ubuntu.com/%s/%s/unpacked/%s-server-cloudimg-%s-vmlinuz-generic", r.Codename, r.Date, r.Codename, r.Arch)
-}
-
-func (r UbuntuRef) InitrdURL() string {
-	if r.Date == "" {
-		return fmt.Sprintf("https://cloud-images.ubuntu.com/releases/%s/release/unpacked/ubuntu-%s-server-cloudimg-%s-initrd-generic", r.Codename, r.Version, r.Arch)
-	}
-	return fmt.Sprintf("https://cloud-images.ubuntu.com/%s/%s/unpacked/%s-server-cloudimg-%s-initrd-generic", r.Codename, r.Date, r.Codename, r.Arch)
 }
 
 func normalizeUbuntuChannel(channel string) (string, string, error) {

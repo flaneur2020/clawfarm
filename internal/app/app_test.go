@@ -98,7 +98,7 @@ func TestRunFlowAndInstanceLifecycle(t *testing.T) {
 	var errOut bytes.Buffer
 	application := NewWithBackend(&out, &errOut, backend)
 
-	if err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--publish", "8080:80", "--no-wait"}); err != nil {
+	if err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--port=65531", "--publish", "8080:80", "--no-wait"}); err != nil {
 		t.Fatalf("run command failed: %v", err)
 	}
 	if !strings.Contains(out.String(), "CLAWID:") {
@@ -198,12 +198,49 @@ func TestRunWaitTimeout(t *testing.T) {
 	var errOut bytes.Buffer
 	application := NewWithBackend(&out, &errOut, backend)
 
-	err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--ready-timeout-secs=1"})
+	err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--port=65530", "--ready-timeout-secs=1"})
 	if err == nil {
 		t.Fatalf("expected timeout error")
 	}
 	if !strings.Contains(err.Error(), "gateway is not reachable yet") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestImageLSShowsDownloadedMarker(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"image", "ls"}); err != nil {
+		t.Fatalf("image ls failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "ubuntu:24.04") {
+		t.Fatalf("image ls missing available image: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "	no") && !strings.Contains(out.String(), "  no") {
+		t.Fatalf("image ls missing non-downloaded marker: %s", out.String())
+	}
+
+	seedFetchedImage(t, cache)
+	out.Reset()
+	if err := application.Run([]string{"image", "ls"}); err != nil {
+		t.Fatalf("image ls failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "	yes") && !strings.Contains(out.String(), "  yes") {
+		t.Fatalf("image ls missing downloaded marker: %s", out.String())
 	}
 }
 
@@ -214,12 +251,10 @@ func seedFetchedImage(t *testing.T, cacheRoot string) {
 	if err := os.MkdirAll(imageDir, 0o755); err != nil {
 		t.Fatalf("mkdir image dir: %v", err)
 	}
-	for _, item := range []string{"kernel", "initrd", "disk.raw"} {
-		if err := os.WriteFile(filepath.Join(imageDir, item), []byte("x"), 0o644); err != nil {
-			t.Fatalf("write image artifact %s: %v", item, err)
-		}
+	if err := os.WriteFile(filepath.Join(imageDir, "image.img"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write image artifact: %v", err)
 	}
-	metadata := `{"ref":"ubuntu:24.04","version":"24.04","codename":"noble","arch":"amd64","image_dir":"` + imageDir + `","kernel_path":"` + filepath.Join(imageDir, "kernel") + `","initrd_path":"` + filepath.Join(imageDir, "initrd") + `","base_image":"` + filepath.Join(imageDir, "base.img") + `","runtime_disk":"` + filepath.Join(imageDir, "disk.raw") + `","ready":true,"disk_format":"raw","fetched_at_utc":"2026-02-08T00:00:00Z","updated_at_utc":"2026-02-08T00:00:00Z"}`
+	metadata := `{"ref":"ubuntu:24.04","version":"24.04","codename":"noble","arch":"amd64","image_dir":"` + imageDir + `","runtime_disk":"` + filepath.Join(imageDir, "image.img") + `","ready":true,"disk_format":"raw","fetched_at_utc":"2026-02-08T00:00:00Z","updated_at_utc":"2026-02-08T00:00:00Z"}`
 	if err := os.WriteFile(filepath.Join(imageDir, "image.json"), []byte(metadata), 0o644); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}

@@ -29,9 +29,9 @@ type qemuPlatform struct {
 	Binary    string
 	Machine   string
 	CPU       string
-	Console   string
 	NetDevice string
 	Accel     string
+	Firmware  string
 }
 
 func NewQEMUBackend(out io.Writer) *QEMUBackend {
@@ -208,17 +208,20 @@ func resolveQEMUPlatform(imageArch string) (qemuPlatform, error) {
 		}
 		platform.Binary = binary
 		platform.Machine = "q35"
-		platform.Console = "ttyS0"
 		platform.NetDevice = "virtio-net-pci"
 	case "arm64":
 		binary, err := exec.LookPath("qemu-system-aarch64")
 		if err != nil {
 			return qemuPlatform{}, errors.New("qemu-system-aarch64 is required")
 		}
+		firmwarePath, err := findAArch64Firmware()
+		if err != nil {
+			return qemuPlatform{}, err
+		}
 		platform.Binary = binary
 		platform.Machine = "virt"
-		platform.Console = "ttyAMA0"
 		platform.NetDevice = "virtio-net-device"
+		platform.Firmware = firmwarePath
 	default:
 		return qemuPlatform{}, fmt.Errorf("unsupported image architecture %q", imageArch)
 	}
@@ -237,7 +240,11 @@ func buildQEMUArgs(
 	pidFilePath string,
 	monitorPath string,
 ) ([]string, error) {
-	for _, path := range []string{diskPath, seedISO, spec.WorkspacePath, spec.StatePath, serialLogPath, qemuLogPath, pidFilePath, monitorPath} {
+	paths := []string{diskPath, seedISO, spec.WorkspacePath, spec.StatePath, serialLogPath, qemuLogPath, pidFilePath, monitorPath}
+	if platform.Firmware != "" {
+		paths = append(paths, platform.Firmware)
+	}
+	for _, path := range paths {
 		if strings.Contains(path, ",") {
 			return nil, fmt.Errorf("path contains unsupported comma: %s", path)
 		}
@@ -258,9 +265,14 @@ func buildQEMUArgs(
 		"-cpu", platform.CPU,
 		"-smp", strconv.Itoa(spec.CPUs),
 		"-m", strconv.Itoa(spec.MemoryMiB),
-		"-kernel", spec.KernelPath,
-		"-initrd", spec.InitrdPath,
-		"-append", fmt.Sprintf("root=/dev/vda1 rw console=%s", platform.Console),
+	}
+
+	if platform.Firmware != "" {
+		args = append(args, "-bios", platform.Firmware)
+	}
+
+	args = append(args,
+		"-boot", "order=c",
 		"-drive", fmt.Sprintf("if=virtio,format=%s,file=%s", diskFormat, diskPath),
 		"-drive", fmt.Sprintf("if=virtio,format=raw,readonly=on,file=%s", seedISO),
 		"-virtfs", fmt.Sprintf("local,path=%s,mount_tag=workspace,security_model=none,id=workspace", spec.WorkspacePath),
@@ -268,12 +280,12 @@ func buildQEMUArgs(
 		"-netdev", netdev,
 		"-device", fmt.Sprintf("%s,netdev=net0", platform.NetDevice),
 		"-display", "none",
-		"-serial", "file:" + serialLogPath,
-		"-monitor", "unix:" + monitorPath + ",server,nowait",
+		"-serial", "file:"+serialLogPath,
+		"-monitor", "unix:"+monitorPath+",server,nowait",
 		"-D", qemuLogPath,
 		"-daemonize",
 		"-pidfile", pidFilePath,
-	}
+	)
 
 	return args, nil
 }
@@ -318,6 +330,8 @@ func validatePort(port int) error {
 }
 
 func prepareInstanceDisk(sourceDiskPath string, instanceDir string, out io.Writer) (string, string, error) {
+	_ = instanceDir
+
 	absoluteSourceDiskPath, err := filepath.Abs(sourceDiskPath)
 	if err != nil {
 		return "", "", err
@@ -326,28 +340,21 @@ func prepareInstanceDisk(sourceDiskPath string, instanceDir string, out io.Write
 		return "", "", fmt.Errorf("source disk not found: %w", err)
 	}
 
-	overlayPath := filepath.Join(instanceDir, "rootfs.qcow2")
+	format := "raw"
 	if qemuImgPath, err := exec.LookPath("qemu-img"); err == nil {
-		_ = os.Remove(overlayPath)
-		baseFormat := "raw"
 		if detectedFormat, detectErr := detectSourceDiskFormat(qemuImgPath, absoluteSourceDiskPath); detectErr == nil {
-			baseFormat = detectedFormat
+			format = detectedFormat
 		}
-		command := exec.Command(qemuImgPath, "create", "-f", "qcow2", "-F", baseFormat, "-b", absoluteSourceDiskPath, overlayPath)
-		output, err := command.CombinedOutput()
-		if err == nil {
-			writeLine(out, "instance disk prepared: %s (qcow2 overlay, base=%s)", overlayPath, baseFormat)
-			return overlayPath, "qcow2", nil
-		}
-		writeLine(out, "qemu-img overlay failed, falling back to raw copy: %s", strings.TrimSpace(string(output)))
+	} else if detectedFormat, detectErr := detectDiskFormatByMagic(absoluteSourceDiskPath); detectErr == nil {
+		format = detectedFormat
 	}
 
-	rawPath := filepath.Join(instanceDir, "rootfs.raw")
-	if err := copyFile(absoluteSourceDiskPath, rawPath); err != nil {
-		return "", "", err
+	if format != "raw" && format != "qcow2" {
+		format = "raw"
 	}
-	writeLine(out, "instance disk prepared: %s (raw copy)", rawPath)
-	return rawPath, "raw", nil
+
+	writeLine(out, "instance disk prepared: %s (%s)", absoluteSourceDiskPath, format)
+	return absoluteSourceDiskPath, format, nil
 }
 
 func detectSourceDiskFormat(qemuImgPath string, imagePath string) (string, error) {
@@ -367,6 +374,40 @@ func detectSourceDiskFormat(qemuImgPath string, imagePath string) (string, error
 		return "", errors.New("empty format")
 	}
 	return payload.Format, nil
+}
+
+func detectDiskFormatByMagic(imagePath string) (string, error) {
+	file, err := os.Open(imagePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(file, header); err != nil {
+		return "", err
+	}
+
+	if string(header) == "QFI\xfb" {
+		return "qcow2", nil
+	}
+	return "raw", nil
+}
+
+func findAArch64Firmware() (string, error) {
+	candidates := []string{
+		"/opt/homebrew/share/qemu/edk2-aarch64-code.fd",
+		"/usr/local/share/qemu/edk2-aarch64-code.fd",
+		"/usr/share/qemu/edk2-aarch64-code.fd",
+		"/usr/share/qemu-efi-aarch64/QEMU_EFI.fd",
+		"/usr/share/edk2/aarch64/QEMU_EFI.fd",
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("aarch64 firmware is required (missing edk2-aarch64-code.fd / QEMU_EFI.fd)")
 }
 
 func createNoCloudSeedISO(spec StartSpec, outputPath string) error {

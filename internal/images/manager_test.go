@@ -2,7 +2,6 @@ package images
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -42,57 +41,6 @@ func TestDetectDiskFormatByMagic(t *testing.T) {
 	}
 }
 
-func TestPrepareRuntimeDiskWithoutQemuForRaw(t *testing.T) {
-	tmpDir := t.TempDir()
-	basePath := filepath.Join(tmpDir, "base.img")
-	diskPath := filepath.Join(tmpDir, "disk.raw")
-
-	if err := os.WriteFile(basePath, []byte("RAWCONTENT"), 0o644); err != nil {
-		t.Fatalf("write base image: %v", err)
-	}
-
-	originalPath := os.Getenv("PATH")
-	defer os.Setenv("PATH", originalPath)
-	if err := os.Setenv("PATH", ""); err != nil {
-		t.Fatalf("set PATH: %v", err)
-	}
-
-	format, err := prepareRuntimeDisk(basePath, diskPath)
-	if err != nil {
-		t.Fatalf("prepareRuntimeDisk failed: %v", err)
-	}
-	if format != "raw" {
-		t.Fatalf("unexpected format: %s", format)
-	}
-	if _, err := os.Stat(diskPath); err != nil {
-		t.Fatalf("disk.raw not created: %v", err)
-	}
-}
-
-func TestPrepareRuntimeDiskWithoutQemuForQCOW2(t *testing.T) {
-	tmpDir := t.TempDir()
-	basePath := filepath.Join(tmpDir, "base.img")
-	diskPath := filepath.Join(tmpDir, "disk.raw")
-
-	if err := os.WriteFile(basePath, append([]byte("QFI\xfb"), []byte("payload")...), 0o644); err != nil {
-		t.Fatalf("write qcow image: %v", err)
-	}
-
-	originalPath := os.Getenv("PATH")
-	defer os.Setenv("PATH", originalPath)
-	if err := os.Setenv("PATH", ""); err != nil {
-		t.Fatalf("set PATH: %v", err)
-	}
-
-	_, err := prepareRuntimeDisk(basePath, diskPath)
-	if err == nil {
-		t.Fatalf("expected error for qcow2 without qemu-img")
-	}
-	if !strings.Contains(err.Error(), "qemu-img is required") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 func TestManagerListAndResolve(t *testing.T) {
 	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
 		t.Skip("unsupported architecture in test environment")
@@ -105,28 +53,23 @@ func TestManagerListAndResolve(t *testing.T) {
 	if err := os.MkdirAll(imageDir, 0o755); err != nil {
 		t.Fatalf("mkdir imageDir: %v", err)
 	}
+
+	runtimePath := filepath.Join(imageDir, imageFileName)
+	if err := os.WriteFile(runtimePath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write runtime image: %v", err)
+	}
+
 	meta := Metadata{
 		Ref:         "ubuntu:24.04",
 		Version:     "24.04",
 		Codename:    "noble",
 		Arch:        runtime.GOARCH,
 		ImageDir:    imageDir,
-		KernelPath:  filepath.Join(imageDir, kernelFileName),
-		InitrdPath:  filepath.Join(imageDir, initrdFileName),
-		BaseImage:   filepath.Join(imageDir, baseImageName),
-		RuntimeDisk: filepath.Join(imageDir, runtimeDiskName),
+		RuntimeDisk: runtimePath,
 		Ready:       true,
+		DiskFormat:  "raw",
 	}
-	for _, path := range []string{meta.KernelPath, meta.InitrdPath, meta.RuntimeDisk} {
-		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
-			t.Fatalf("write file %s: %v", path, err)
-		}
-	}
-	bytes, err := json.Marshal(meta)
-	if err != nil {
-		t.Fatalf("marshal metadata: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(imageDir, metadataFileName), bytes, 0o644); err != nil {
+	if err := writeMetadata(filepath.Join(imageDir, metadataFileName), meta); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}
 
@@ -140,9 +83,63 @@ func TestManagerListAndResolve(t *testing.T) {
 	if items[0].Ref != "ubuntu:24.04" {
 		t.Fatalf("unexpected ref: %s", items[0].Ref)
 	}
+	if !items[0].Ready {
+		t.Fatalf("expected ready image")
+	}
 
 	if _, err := manager.Resolve("ubuntu:24.04"); err != nil {
 		t.Fatalf("Resolve failed: %v", err)
+	}
+}
+
+func TestListAvailableIncludesDownloadedMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	manager := NewManager(tmpDir, nil)
+
+	items, err := manager.ListAvailable()
+	if err != nil {
+		t.Fatalf("ListAvailable failed: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatalf("expected at least one supported image")
+	}
+	if items[0].Ref != "ubuntu:24.04" {
+		t.Fatalf("expected ubuntu:24.04, got %s", items[0].Ref)
+	}
+	if items[0].Ready {
+		t.Fatalf("expected not-downloaded image")
+	}
+
+	imageDir := filepath.Join(tmpDir, "images", "ubuntu_24.04")
+	if err := os.MkdirAll(imageDir, 0o755); err != nil {
+		t.Fatalf("mkdir imageDir: %v", err)
+	}
+	runtimePath := filepath.Join(imageDir, imageFileName)
+	if err := os.WriteFile(runtimePath, []byte("img"), 0o644); err != nil {
+		t.Fatalf("write runtime image: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := writeMetadata(filepath.Join(imageDir, metadataFileName), Metadata{
+		Ref:          "ubuntu:24.04",
+		Version:      "24.04",
+		Codename:     "noble",
+		Arch:         runtime.GOARCH,
+		ImageDir:     imageDir,
+		RuntimeDisk:  runtimePath,
+		Ready:        true,
+		DiskFormat:   "raw",
+		FetchedAtUTC: now,
+		UpdatedAtUTC: now,
+	}); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	items, err = manager.ListAvailable()
+	if err != nil {
+		t.Fatalf("ListAvailable failed: %v", err)
+	}
+	if len(items) == 0 || !items[0].Ready {
+		t.Fatalf("expected downloaded image to be marked ready")
 	}
 }
 
@@ -176,7 +173,7 @@ func TestDownloadFileWithProgress(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "artifact")
 	var output strings.Builder
-	if err := downloadFile(context.Background(), server.URL, path, &output, "test"); err != nil {
+	if err := downloadFile(context.Background(), server.URL, path, &output, "image"); err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
 	}
 	if !strings.Contains(output.String(), "100.0%") {
@@ -186,21 +183,17 @@ func TestDownloadFileWithProgress(t *testing.T) {
 
 func TestFetchUsesCachedArtifactsWithoutDownloading(t *testing.T) {
 	tmpDir := t.TempDir()
-	manager := NewManager(tmpDir, nil)
+	var output strings.Builder
+	manager := NewManager(tmpDir, &output)
 
 	imageDir := filepath.Join(tmpDir, "images", "ubuntu_24.04")
 	if err := os.MkdirAll(imageDir, 0o755); err != nil {
 		t.Fatalf("mkdir image dir: %v", err)
 	}
 
-	kernel := filepath.Join(imageDir, kernelFileName)
-	initrd := filepath.Join(imageDir, initrdFileName)
-	base := filepath.Join(imageDir, baseImageName)
-	disk := filepath.Join(imageDir, runtimeDiskName)
-	for _, path := range []string{kernel, initrd, base, disk} {
-		if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
-			t.Fatalf("write %s: %v", path, err)
-		}
+	runtimePath := filepath.Join(imageDir, imageFileName)
+	if err := os.WriteFile(runtimePath, []byte("data"), 0o644); err != nil {
+		t.Fatalf("write runtime image: %v", err)
 	}
 
 	now := time.Now().UTC()
@@ -210,10 +203,7 @@ func TestFetchUsesCachedArtifactsWithoutDownloading(t *testing.T) {
 		Codename:     "noble",
 		Arch:         runtime.GOARCH,
 		ImageDir:     imageDir,
-		KernelPath:   kernel,
-		InitrdPath:   initrd,
-		BaseImage:    base,
-		RuntimeDisk:  disk,
+		RuntimeDisk:  runtimePath,
 		Ready:        true,
 		DiskFormat:   "raw",
 		FetchedAtUTC: now,
@@ -223,9 +213,9 @@ func TestFetchUsesCachedArtifactsWithoutDownloading(t *testing.T) {
 		t.Fatalf("write metadata: %v", err)
 	}
 
-	before, err := os.Stat(kernel)
+	before, err := os.Stat(runtimePath)
 	if err != nil {
-		t.Fatalf("stat kernel before: %v", err)
+		t.Fatalf("stat runtime before: %v", err)
 	}
 
 	result, err := manager.Fetch(context.Background(), "ubuntu:24.04")
@@ -235,10 +225,13 @@ func TestFetchUsesCachedArtifactsWithoutDownloading(t *testing.T) {
 	if result.Ref != "ubuntu:24.04" {
 		t.Fatalf("unexpected ref: %s", result.Ref)
 	}
+	if !strings.Contains(output.String(), "using cached image") {
+		t.Fatalf("expected cached image message, got %q", output.String())
+	}
 
-	after, err := os.Stat(kernel)
+	after, err := os.Stat(runtimePath)
 	if err != nil {
-		t.Fatalf("stat kernel after: %v", err)
+		t.Fatalf("stat runtime after: %v", err)
 	}
 	if !before.ModTime().Equal(after.ModTime()) {
 		t.Fatalf("expected cached artifact unchanged")

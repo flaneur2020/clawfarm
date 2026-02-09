@@ -83,18 +83,26 @@ func (a *App) runImage(args []string) error {
 		if len(args) != 1 {
 			return errors.New("usage: vclaw image ls")
 		}
-		items, err := manager.List()
+		items, err := manager.ListAvailable()
 		if err != nil {
 			return err
 		}
 		if len(items) == 0 {
-			fmt.Fprintln(a.out, "no cached images")
+			fmt.Fprintln(a.out, "no images available")
 			return nil
 		}
 		tw := tabwriter.NewWriter(a.out, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "REF\tARCH\tREADY\tUPDATED(UTC)")
+		fmt.Fprintln(tw, "REF\tARCH\tDOWNLOADED\tUPDATED(UTC)")
 		for _, item := range items {
-			fmt.Fprintf(tw, "%s\t%s\t%t\t%s\n", item.Ref, item.Arch, item.Ready, item.UpdatedAtUTC.Format(time.RFC3339))
+			downloaded := "no"
+			updated := "-"
+			if item.Ready {
+				downloaded = "yes"
+				if !item.UpdatedAtUTC.IsZero() {
+					updated = item.UpdatedAtUTC.Format(time.RFC3339)
+				}
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", item.Ref, item.Arch, downloaded, updated)
 		}
 		return tw.Flush()
 	case "fetch":
@@ -108,10 +116,8 @@ func (a *App) runImage(args []string) error {
 			return err
 		}
 		fmt.Fprintf(a.out, "cached image %s\n", meta.Ref)
-		fmt.Fprintf(a.out, "  kernel: %s\n", meta.KernelPath)
-		fmt.Fprintf(a.out, "  initrd: %s\n", meta.InitrdPath)
-		fmt.Fprintf(a.out, "  base:   %s\n", meta.BaseImage)
-		fmt.Fprintf(a.out, "  disk:   %s\n", meta.RuntimeDisk)
+		fmt.Fprintf(a.out, "  file:   %s\n", meta.RuntimeDisk)
+		fmt.Fprintf(a.out, "  format: %s\n", meta.DiskFormat)
 		return nil
 	default:
 		return fmt.Errorf("unknown image subcommand %q", args[0])
@@ -214,8 +220,6 @@ func (a *App) runRun(args []string) error {
 		InstanceID:       id,
 		InstanceDir:      instanceDir,
 		ImageArch:        imageMeta.Arch,
-		KernelPath:       imageMeta.KernelPath,
-		InitrdPath:       imageMeta.InitrdPath,
 		SourceDiskPath:   instanceImagePath,
 		WorkspacePath:    workspacePath,
 		StatePath:        statePath,

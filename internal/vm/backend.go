@@ -20,8 +20,6 @@ type StartSpec struct {
 	InstanceID        string
 	InstanceDir       string
 	ImageArch         string
-	KernelPath        string
-	InitrdPath        string
 	SourceDiskPath    string
 	WorkspacePath     string
 	StatePath         string

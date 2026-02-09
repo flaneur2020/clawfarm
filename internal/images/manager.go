@@ -16,11 +16,9 @@ import (
 )
 
 const (
-	kernelFileName   = "kernel"
-	initrdFileName   = "initrd"
-	baseImageName    = "base.img"
-	runtimeDiskName  = "disk.raw"
-	metadataFileName = "image.json"
+	imageFileName     = "image.img"
+	legacyRuntimeDisk = "disk.raw"
+	metadataFileName  = "image.json"
 )
 
 var ErrImageNotFetched = errors.New("image not fetched")
@@ -32,9 +30,6 @@ type Metadata struct {
 	Date         string    `json:"date,omitempty"`
 	Arch         string    `json:"arch"`
 	ImageDir     string    `json:"image_dir"`
-	KernelPath   string    `json:"kernel_path"`
-	InitrdPath   string    `json:"initrd_path"`
-	BaseImage    string    `json:"base_image"`
 	RuntimeDisk  string    `json:"runtime_disk"`
 	Ready        bool      `json:"ready"`
 	DiskFormat   string    `json:"disk_format"`
@@ -72,7 +67,8 @@ func (m *Manager) List() ([]Metadata, error) {
 		if err != nil {
 			continue
 		}
-		meta.Ready = fileExists(meta.KernelPath) && fileExists(meta.InitrdPath) && fileExists(meta.RuntimeDisk)
+		meta = normalizeMetadata(imageDir, meta)
+		meta.Ready = fileExistsAndNonEmpty(meta.RuntimeDisk)
 		items = append(items, meta)
 	}
 
@@ -86,11 +82,62 @@ func (m *Manager) List() ([]Metadata, error) {
 	return items, nil
 }
 
+func (m *Manager) ListAvailable() ([]Metadata, error) {
+	cached, err := m.List()
+	if err != nil {
+		return nil, err
+	}
+
+	cachedByRef := map[string]Metadata{}
+	for _, item := range cached {
+		cachedByRef[item.Ref] = item
+	}
+
+	items := make([]Metadata, 0, len(SupportedRefs())+len(cachedByRef))
+	for _, ref := range SupportedRefs() {
+		if existing, ok := cachedByRef[ref]; ok {
+			items = append(items, existing)
+			delete(cachedByRef, ref)
+			continue
+		}
+
+		parsed, err := ParseUbuntuRef(ref)
+		if err != nil {
+			continue
+		}
+		imageDir := filepath.Join(m.imagesRoot(), parsed.ImageDirName())
+		items = append(items, Metadata{
+			Ref:         parsed.Original,
+			Version:     parsed.Version,
+			Codename:    parsed.Codename,
+			Date:        parsed.Date,
+			Arch:        parsed.Arch,
+			ImageDir:    imageDir,
+			RuntimeDisk: filepath.Join(imageDir, imageFileName),
+			Ready:       false,
+		})
+	}
+
+	for _, item := range cachedByRef {
+		items = append(items, item)
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Ready != items[j].Ready {
+			return items[i].Ready
+		}
+		return items[i].Ref < items[j].Ref
+	})
+
+	return items, nil
+}
+
 func (m *Manager) Resolve(ref string) (Metadata, error) {
 	parsed, err := ParseUbuntuRef(ref)
 	if err != nil {
 		return Metadata{}, err
 	}
+
 	imageDir := filepath.Join(m.imagesRoot(), parsed.ImageDirName())
 	metaPath := filepath.Join(imageDir, metadataFileName)
 	meta, err := readMetadata(metaPath)
@@ -100,8 +147,14 @@ func (m *Manager) Resolve(ref string) (Metadata, error) {
 		}
 		return Metadata{}, err
 	}
-	if !(fileExists(meta.KernelPath) && fileExists(meta.InitrdPath) && fileExists(meta.RuntimeDisk)) {
+
+	meta = normalizeMetadata(imageDir, meta)
+	if !fileExistsAndNonEmpty(meta.RuntimeDisk) {
 		return Metadata{}, ErrImageNotFetched
+	}
+	meta.Ready = true
+	if meta.DiskFormat == "" {
+		meta.DiskFormat = detectDownloadedDiskFormat(meta.RuntimeDisk)
 	}
 	return meta, nil
 }
@@ -117,18 +170,25 @@ func (m *Manager) Fetch(ctx context.Context, ref string) (Metadata, error) {
 		return Metadata{}, err
 	}
 
-	kernelPath := filepath.Join(imageDir, kernelFileName)
-	initrdPath := filepath.Join(imageDir, initrdFileName)
-	basePath := filepath.Join(imageDir, baseImageName)
-	diskPath := filepath.Join(imageDir, runtimeDiskName)
+	diskPath := filepath.Join(imageDir, imageFileName)
+	legacyPath := filepath.Join(imageDir, legacyRuntimeDisk)
 	metaPath := filepath.Join(imageDir, metadataFileName)
 
-	if artifactsReady(kernelPath, initrdPath, basePath, diskPath) {
+	availableDisk := resolveCachedDiskPath(diskPath, legacyPath)
+	if availableDisk != "" {
 		cachedMeta, err := readMetadata(metaPath)
 		if err == nil {
+			cachedMeta = normalizeMetadata(imageDir, cachedMeta)
+			cachedMeta.RuntimeDisk = availableDisk
 			cachedMeta.Ready = true
+			if cachedMeta.DiskFormat == "" {
+				cachedMeta.DiskFormat = detectDownloadedDiskFormat(availableDisk)
+			}
 			if m.stdout != nil {
 				fmt.Fprintf(m.stdout, "using cached image %s\n", cachedMeta.Ref)
+			}
+			if writeErr := writeMetadata(metaPath, cachedMeta); writeErr != nil {
+				return Metadata{}, writeErr
 			}
 			return cachedMeta, nil
 		}
@@ -141,12 +201,9 @@ func (m *Manager) Fetch(ctx context.Context, ref string) (Metadata, error) {
 			Date:         parsed.Date,
 			Arch:         parsed.Arch,
 			ImageDir:     imageDir,
-			KernelPath:   kernelPath,
-			InitrdPath:   initrdPath,
-			BaseImage:    basePath,
-			RuntimeDisk:  diskPath,
+			RuntimeDisk:  availableDisk,
 			Ready:        true,
-			DiskFormat:   "raw",
+			DiskFormat:   detectDownloadedDiskFormat(availableDisk),
 			FetchedAtUTC: now,
 			UpdatedAtUTC: now,
 		}
@@ -159,23 +216,8 @@ func (m *Manager) Fetch(ctx context.Context, ref string) (Metadata, error) {
 		return generatedMeta, nil
 	}
 
-	if err := ensureDownloadedFile(ctx, parsed.KernelURL(), kernelPath, m.stdout, "kernel"); err != nil {
-		return Metadata{}, fmt.Errorf("download kernel: %w", err)
-	}
-	if err := ensureDownloadedFile(ctx, parsed.InitrdURL(), initrdPath, m.stdout, "initrd"); err != nil {
-		return Metadata{}, fmt.Errorf("download initrd: %w", err)
-	}
-	if err := ensureDownloadedFile(ctx, parsed.BaseImageURL(), basePath, m.stdout, "base"); err != nil {
-		return Metadata{}, fmt.Errorf("download base image: %w", err)
-	}
-
-	format := "raw"
-	if !fileExistsAndNonEmpty(diskPath) {
-		preparedFormat, prepareErr := prepareRuntimeDisk(basePath, diskPath)
-		if prepareErr != nil {
-			return Metadata{}, fmt.Errorf("prepare runtime disk: %w", prepareErr)
-		}
-		format = preparedFormat
+	if err := ensureDownloadedFile(ctx, parsed.BaseImageURL(), diskPath, m.stdout, "image"); err != nil {
+		return Metadata{}, fmt.Errorf("download image: %w", err)
 	}
 
 	now := time.Now().UTC()
@@ -186,12 +228,9 @@ func (m *Manager) Fetch(ctx context.Context, ref string) (Metadata, error) {
 		Date:         parsed.Date,
 		Arch:         parsed.Arch,
 		ImageDir:     imageDir,
-		KernelPath:   kernelPath,
-		InitrdPath:   initrdPath,
-		BaseImage:    basePath,
 		RuntimeDisk:  diskPath,
 		Ready:        true,
-		DiskFormat:   format,
+		DiskFormat:   detectDownloadedDiskFormat(diskPath),
 		FetchedAtUTC: now,
 		UpdatedAtUTC: now,
 	}
@@ -203,19 +242,52 @@ func (m *Manager) Fetch(ctx context.Context, ref string) (Metadata, error) {
 	return meta, nil
 }
 
+func (m *Manager) imagesRoot() string {
+	return filepath.Join(m.root, "images")
+}
+
+func normalizeMetadata(imageDir string, meta Metadata) Metadata {
+	if meta.ImageDir == "" {
+		meta.ImageDir = imageDir
+	}
+	if meta.RuntimeDisk == "" {
+		meta.RuntimeDisk = resolveCachedDiskPath(filepath.Join(imageDir, imageFileName), filepath.Join(imageDir, legacyRuntimeDisk))
+	}
+	if meta.RuntimeDisk == "" {
+		meta.RuntimeDisk = filepath.Join(imageDir, imageFileName)
+	}
+	if meta.Arch == "" && meta.Ref != "" {
+		if parsed, err := ParseUbuntuRef(meta.Ref); err == nil {
+			meta.Arch = parsed.Arch
+			if meta.Version == "" {
+				meta.Version = parsed.Version
+			}
+			if meta.Codename == "" {
+				meta.Codename = parsed.Codename
+			}
+			if meta.Date == "" {
+				meta.Date = parsed.Date
+			}
+		}
+	}
+	return meta
+}
+
+func resolveCachedDiskPath(primaryPath string, legacyPath string) string {
+	if fileExistsAndNonEmpty(primaryPath) {
+		return primaryPath
+	}
+	if fileExistsAndNonEmpty(legacyPath) {
+		return legacyPath
+	}
+	return ""
+}
+
 func ensureDownloadedFile(ctx context.Context, url string, destination string, out io.Writer, label string) error {
 	if fileExistsAndNonEmpty(destination) {
 		return nil
 	}
 	return downloadFile(ctx, url, destination, out, label)
-}
-
-func artifactsReady(kernelPath string, initrdPath string, basePath string, diskPath string) bool {
-	return fileExistsAndNonEmpty(kernelPath) && fileExistsAndNonEmpty(initrdPath) && fileExistsAndNonEmpty(basePath) && fileExistsAndNonEmpty(diskPath)
-}
-
-func (m *Manager) imagesRoot() string {
-	return filepath.Join(m.root, "images")
 }
 
 func downloadFile(ctx context.Context, url string, destination string, out io.Writer, label string) error {
@@ -340,54 +412,16 @@ func humanBytes(value int64) string {
 	return fmt.Sprintf("%.1fPB", size/1024)
 }
 
-func prepareRuntimeDisk(basePath, diskPath string) (string, error) {
-	binary, err := exec.LookPath("qemu-img")
-	if err != nil {
-		fallbackFormat, detectErr := detectDiskFormatByMagic(basePath)
-		if detectErr == nil {
-			switch fallbackFormat {
-			case "raw":
-				if copyErr := copyFile(basePath, diskPath); copyErr != nil {
-					return "", copyErr
-				}
-				return "raw", nil
-			case "qcow2":
-				return "", errors.New("qemu-img is required to convert qcow2 images; install qemu-img and retry")
-			}
+func detectDownloadedDiskFormat(imagePath string) string {
+	if qemuImgPath, err := exec.LookPath("qemu-img"); err == nil {
+		if format, detectErr := detectDiskFormat(qemuImgPath, imagePath); detectErr == nil {
+			return format
 		}
-		if copyErr := copyFile(basePath, diskPath); copyErr != nil {
-			return "", copyErr
-		}
-		return "unknown", nil
 	}
-
-	format, err := detectDiskFormat(binary, basePath)
-	if err != nil {
-		format = ""
+	if format, err := detectDiskFormatByMagic(imagePath); err == nil {
+		return format
 	}
-
-	if format == "raw" {
-		if err := copyFile(basePath, diskPath); err != nil {
-			return "", err
-		}
-		return "raw", nil
-	}
-
-	convertArgs := []string{"convert"}
-	if format != "" {
-		convertArgs = append(convertArgs, "-f", format)
-	}
-	convertArgs = append(convertArgs, "-O", "raw", basePath, diskPath)
-	cmd := exec.Command(binary, convertArgs...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("qemu-img convert failed: %s", strings.TrimSpace(string(output)))
-	}
-
-	if format == "" {
-		return "raw", nil
-	}
-	return format, nil
+	return "unknown"
 }
 
 func detectDiskFormat(qemuBinary, imagePath string) (string, error) {
@@ -427,40 +461,6 @@ func detectDiskFormatByMagic(imagePath string) (string, error) {
 	return "raw", nil
 }
 
-func copyFile(sourcePath, destinationPath string) error {
-	source, err := os.Open(sourcePath)
-	if err != nil {
-		return err
-	}
-	defer source.Close()
-
-	if err := os.MkdirAll(filepath.Dir(destinationPath), 0o755); err != nil {
-		return err
-	}
-
-	tmpPath := destinationPath + ".tmp"
-	target, err := os.Create(tmpPath)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(target, source); err != nil {
-		target.Close()
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	if err := target.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-
-	if err := os.Rename(tmpPath, destinationPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-
-	return nil
-}
-
 func writeMetadata(path string, metadata Metadata) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -488,11 +488,6 @@ func readMetadata(path string) (Metadata, error) {
 		return Metadata{}, err
 	}
 	return metadata, nil
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 func fileExistsAndNonEmpty(path string) bool {

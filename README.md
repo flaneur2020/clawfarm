@@ -10,7 +10,7 @@ This repository now includes:
 
 - Go-based `vclaw` CLI: `run`, `image`, `ps`, `suspend`, `resume`, `rm`
 - Ubuntu image reference parsing (`ubuntu:24.04`, `ubuntu:24.04@YYYYMMDD`)
-- Image artifact caching under `~/.vclaw/images` (override with `VCLAW_HOME`/`VCLAW_CACHE_DIR`)
+- Single-file image caching under `~/.vclaw/images` (override with `VCLAW_HOME`/`VCLAW_CACHE_DIR`)
 - Real VM run path via QEMU:
   - cloud-init seed generation
   - workspace/state host mounts
@@ -37,6 +37,8 @@ vclaw suspend <CLAWID>
 vclaw resume <CLAWID>
 vclaw rm <CLAWID>
 ```
+
+The `image ls` table lists supported images and marks whether each image is already downloaded (`yes`/`no`).
 
 Useful `run` flags:
 
@@ -85,11 +87,10 @@ To verify image cache reuse and per-instance image copy:
 make integration-002
 ```
 
-## Notes on image conversion
+## Notes on image download/cache
 
-`vclaw image fetch` normalizes runtime disks to `disk.raw`.
+`vclaw image fetch` downloads one image file per ref (for example `image.img`; underlying format may be raw or qcow2).
 
-- If `qemu-img` is available, `vclaw` detects source format and converts to raw when needed.
-- If `qemu-img` is missing and the source image appears to be qcow2, fetch fails with an explicit install hint.
-- If artifacts are already ready in `~/.vclaw/images/<ref>/`, `vclaw image fetch` reuses cache and does not download again.
-- Each `vclaw run` copies cached disk to `~/.vclaw/instances/<CLAWID>/instance.img` before VM start.
+- If the image is already present in `~/.vclaw/images/<ref>/`, `vclaw image fetch` reuses cache and does not download again.
+- `vclaw image fetch` shows a dynamic progress bar while downloading.
+- Each `vclaw run` copies the cached image to `~/.vclaw/instances/<CLAWID>/instance.img` before VM start.

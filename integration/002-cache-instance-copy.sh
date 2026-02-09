@@ -29,6 +29,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+rm -rf "${TEST_TMP}"
 mkdir -p "${TEST_TMP}" "${HOME_DIR}" "${WORKDIR}"
 printf 'integration-002 %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >"${WORKDIR}/integration-002.txt"
 
@@ -73,7 +74,7 @@ if ! grep -q "using cached image" "${TEST_TMP}/second-fetch.log"; then
   exit 1
 fi
 
-if grep -Eq 'kernel \[|initrd \[|base   \[' "${TEST_TMP}/second-fetch.log"; then
+if grep -Eq 'image  \[' "${TEST_TMP}/second-fetch.log"; then
   echo "[002-cache-copy] second fetch unexpectedly showed download progress" >&2
   cat "${TEST_TMP}/second-fetch.log" >&2
   exit 1
@@ -81,7 +82,7 @@ fi
 
 IMAGE_NAME="$(sanitize_ref "${INTEGRATION_IMAGE_REF}")"
 IMAGE_DIR="${HOME_DIR}/.vclaw/images/${IMAGE_NAME}"
-SOURCE_DISK="${IMAGE_DIR}/disk.raw"
+SOURCE_DISK="${IMAGE_DIR}/image.img"
 
 if [[ ! -f "${SOURCE_DISK}" ]]; then
   echo "[002-cache-copy] expected cached disk at ${SOURCE_DISK}" >&2
@@ -119,8 +120,8 @@ fi
 
 SOURCE_SIZE="$(stat -f%z "${SOURCE_DISK}")"
 INSTANCE_SIZE="$(stat -f%z "${INSTANCE_IMG}")"
-if [[ "${SOURCE_SIZE}" -ne "${INSTANCE_SIZE}" ]]; then
-  echo "[002-cache-copy] size mismatch: source=${SOURCE_SIZE} instance=${INSTANCE_SIZE}" >&2
+if [[ "${INSTANCE_SIZE}" -lt "${SOURCE_SIZE}" ]]; then
+  echo "[002-cache-copy] unexpected size shrink: source=${SOURCE_SIZE} instance=${INSTANCE_SIZE}" >&2
   exit 1
 fi
 

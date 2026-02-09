@@ -16,6 +16,7 @@ DATA_DIR="${TEST_TMP}/data"
 WORKDIR="${TEST_TMP}/workspace"
 RUN_LOG="${TEST_TMP}/vclaw-run.log"
 
+rm -rf "${TEST_TMP}"
 mkdir -p "${TEST_TMP}" "${CACHE_DIR}" "${DATA_DIR}" "${WORKDIR}"
 printf 'integration-001 %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >"${WORKDIR}/integration-001.txt"
 
