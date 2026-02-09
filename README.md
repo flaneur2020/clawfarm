@@ -21,8 +21,10 @@ This repository now includes:
 ## Build
 
 ```bash
-go build -o vclaw ./cmd/vclaw
+make build
 ```
+
+(Equivalent manual command: `go build -o vclaw ./cmd/vclaw`.)
 
 ## Command examples
 
@@ -48,17 +50,39 @@ vclaw run ubuntu:24.04 \
   --ready-timeout-secs=900
 ```
 
+## Make targets
+
+```bash
+make help
+make test
+make integration-001
+make integration-001-run
+make integration-002
+make clean
+```
+
+Use `INTEGRATION_IMAGE_REF` to override the integration image, for example:
+
+```bash
+make integration-002 INTEGRATION_IMAGE_REF=ubuntu:24.04@20250115
+```
+
 ## Integration smoke script
 
 ```bash
-go build -o vclaw ./cmd/vclaw
-integration/001-basic.sh
+make integration-001
 ```
 
 To execute full VM run + readiness probe:
 
 ```bash
-INTEGRATION_ENABLE_RUN=1 integration/001-basic.sh
+make integration-001-run
+```
+
+To verify image cache reuse and per-instance image copy:
+
+```bash
+make integration-002
 ```
 
 ## Notes on image conversion

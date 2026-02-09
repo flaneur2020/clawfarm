@@ -1,0 +1,31 @@
+SHELL := /bin/bash
+
+GO ?= go
+VCLAW_BIN ?= $(CURDIR)/vclaw
+INTEGRATION_IMAGE_REF ?= ubuntu:24.04
+
+.PHONY: help build test integration integration-001 integration-001-run integration-002 clean
+
+help: ## Show available targets
+	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+build: ## Build vclaw binary
+	$(GO) build -o $(VCLAW_BIN) ./cmd/vclaw
+
+test: ## Run Go unit tests
+	$(GO) test ./...
+
+integration-001: build ## Run integration 001 (no VM run)
+	INTEGRATION_ENABLE_RUN=0 INTEGRATION_IMAGE_REF=$(INTEGRATION_IMAGE_REF) VCLAW_BIN=$(VCLAW_BIN) integration/001-basic.sh
+
+integration-001-run: build ## Run integration 001 with full VM bring-up
+	INTEGRATION_ENABLE_RUN=1 INTEGRATION_IMAGE_REF=$(INTEGRATION_IMAGE_REF) VCLAW_BIN=$(VCLAW_BIN) integration/001-basic.sh
+
+integration-002: build ## Run integration 002 (cache reuse + instance image copy)
+	INTEGRATION_IMAGE_REF=$(INTEGRATION_IMAGE_REF) VCLAW_BIN=$(VCLAW_BIN) integration/002-cache-instance-copy.sh
+
+integration: integration-001 integration-002 ## Run default integration suite
+
+clean: ## Remove local build and temp artifacts
+	rm -f $(VCLAW_BIN)
+	rm -rf .tmp
