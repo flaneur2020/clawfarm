@@ -10,13 +10,13 @@ This repository now includes:
 
 - Go-based `vclaw` CLI: `run`, `image`, `ps`, `suspend`, `resume`, `rm`
 - Ubuntu image reference parsing (`ubuntu:24.04`, `ubuntu:24.04@YYYYMMDD`)
-- Image artifact caching under `~/.cache/vclaw/images` (override with `VCLAW_CACHE_DIR`)
+- Image artifact caching under `~/.vclaw/images` (override with `VCLAW_HOME`/`VCLAW_CACHE_DIR`)
 - Real VM run path via QEMU:
   - cloud-init seed generation
   - workspace/state host mounts
   - OpenClaw bootstrap in guest
   - host loopback port forwarding for gateway and `--publish`
-- Instance metadata + process lifecycle under `~/.local/share/vclaw/instances` (override with `VCLAW_DATA_DIR`)
+- Instance metadata + process lifecycle under `~/.vclaw/instances` (override with `VCLAW_HOME`/`VCLAW_DATA_DIR`)
 
 ## Build
 
@@ -67,3 +67,5 @@ INTEGRATION_ENABLE_RUN=1 integration/001-basic.sh
 
 - If `qemu-img` is available, `vclaw` detects source format and converts to raw when needed.
 - If `qemu-img` is missing and the source image appears to be qcow2, fetch fails with an explicit install hint.
+- If artifacts are already ready in `~/.vclaw/images/<ref>/`, `vclaw image fetch` reuses cache and does not download again.
+- Each `vclaw run` copies cached disk to `~/.vclaw/instances/<CLAWID>/instance.img` before VM start.

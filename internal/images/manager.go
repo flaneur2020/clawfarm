@@ -121,20 +121,61 @@ func (m *Manager) Fetch(ctx context.Context, ref string) (Metadata, error) {
 	initrdPath := filepath.Join(imageDir, initrdFileName)
 	basePath := filepath.Join(imageDir, baseImageName)
 	diskPath := filepath.Join(imageDir, runtimeDiskName)
+	metaPath := filepath.Join(imageDir, metadataFileName)
 
-	if err := downloadFile(ctx, parsed.KernelURL(), kernelPath); err != nil {
+	if artifactsReady(kernelPath, initrdPath, basePath, diskPath) {
+		cachedMeta, err := readMetadata(metaPath)
+		if err == nil {
+			cachedMeta.Ready = true
+			if m.stdout != nil {
+				fmt.Fprintf(m.stdout, "using cached image %s\n", cachedMeta.Ref)
+			}
+			return cachedMeta, nil
+		}
+
+		now := time.Now().UTC()
+		generatedMeta := Metadata{
+			Ref:          parsed.Original,
+			Version:      parsed.Version,
+			Codename:     parsed.Codename,
+			Date:         parsed.Date,
+			Arch:         parsed.Arch,
+			ImageDir:     imageDir,
+			KernelPath:   kernelPath,
+			InitrdPath:   initrdPath,
+			BaseImage:    basePath,
+			RuntimeDisk:  diskPath,
+			Ready:        true,
+			DiskFormat:   "raw",
+			FetchedAtUTC: now,
+			UpdatedAtUTC: now,
+		}
+		if writeErr := writeMetadata(metaPath, generatedMeta); writeErr != nil {
+			return Metadata{}, writeErr
+		}
+		if m.stdout != nil {
+			fmt.Fprintf(m.stdout, "using cached image %s\n", generatedMeta.Ref)
+		}
+		return generatedMeta, nil
+	}
+
+	if err := ensureDownloadedFile(ctx, parsed.KernelURL(), kernelPath, m.stdout, "kernel"); err != nil {
 		return Metadata{}, fmt.Errorf("download kernel: %w", err)
 	}
-	if err := downloadFile(ctx, parsed.InitrdURL(), initrdPath); err != nil {
+	if err := ensureDownloadedFile(ctx, parsed.InitrdURL(), initrdPath, m.stdout, "initrd"); err != nil {
 		return Metadata{}, fmt.Errorf("download initrd: %w", err)
 	}
-	if err := downloadFile(ctx, parsed.BaseImageURL(), basePath); err != nil {
+	if err := ensureDownloadedFile(ctx, parsed.BaseImageURL(), basePath, m.stdout, "base"); err != nil {
 		return Metadata{}, fmt.Errorf("download base image: %w", err)
 	}
 
-	format, err := prepareRuntimeDisk(basePath, diskPath)
-	if err != nil {
-		return Metadata{}, fmt.Errorf("prepare runtime disk: %w", err)
+	format := "raw"
+	if !fileExistsAndNonEmpty(diskPath) {
+		preparedFormat, prepareErr := prepareRuntimeDisk(basePath, diskPath)
+		if prepareErr != nil {
+			return Metadata{}, fmt.Errorf("prepare runtime disk: %w", prepareErr)
+		}
+		format = preparedFormat
 	}
 
 	now := time.Now().UTC()
@@ -155,18 +196,29 @@ func (m *Manager) Fetch(ctx context.Context, ref string) (Metadata, error) {
 		UpdatedAtUTC: now,
 	}
 
-	if err := writeMetadata(filepath.Join(imageDir, metadataFileName), meta); err != nil {
+	if err := writeMetadata(metaPath, meta); err != nil {
 		return Metadata{}, err
 	}
 
 	return meta, nil
 }
 
+func ensureDownloadedFile(ctx context.Context, url string, destination string, out io.Writer, label string) error {
+	if fileExistsAndNonEmpty(destination) {
+		return nil
+	}
+	return downloadFile(ctx, url, destination, out, label)
+}
+
+func artifactsReady(kernelPath string, initrdPath string, basePath string, diskPath string) bool {
+	return fileExistsAndNonEmpty(kernelPath) && fileExistsAndNonEmpty(initrdPath) && fileExistsAndNonEmpty(basePath) && fileExistsAndNonEmpty(diskPath)
+}
+
 func (m *Manager) imagesRoot() string {
 	return filepath.Join(m.root, "images")
 }
 
-func downloadFile(ctx context.Context, url string, destination string) error {
+func downloadFile(ctx context.Context, url string, destination string, out io.Writer, label string) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -191,11 +243,57 @@ func downloadFile(ctx context.Context, url string, destination string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(file, response.Body); err != nil {
-		file.Close()
-		_ = os.Remove(tempFile)
-		return err
+
+	if out == nil {
+		if _, err := io.Copy(file, response.Body); err != nil {
+			file.Close()
+			_ = os.Remove(tempFile)
+			return err
+		}
+	} else {
+		buffer := make([]byte, 1024*1024)
+		total := response.ContentLength
+		var downloaded int64
+		lastRender := time.Time{}
+		render := func(force bool) {
+			if !force && !lastRender.IsZero() && time.Since(lastRender) < 120*time.Millisecond {
+				return
+			}
+			lastRender = time.Now()
+			renderDownloadProgress(out, label, downloaded, total)
+		}
+
+		for {
+			readBytes, readErr := response.Body.Read(buffer)
+			if readBytes > 0 {
+				writtenBytes, writeErr := file.Write(buffer[:readBytes])
+				if writeErr != nil {
+					file.Close()
+					_ = os.Remove(tempFile)
+					return writeErr
+				}
+				if writtenBytes != readBytes {
+					file.Close()
+					_ = os.Remove(tempFile)
+					return io.ErrShortWrite
+				}
+				downloaded += int64(readBytes)
+				render(false)
+			}
+
+			if readErr == io.EOF {
+				render(true)
+				fmt.Fprintln(out)
+				break
+			}
+			if readErr != nil {
+				file.Close()
+				_ = os.Remove(tempFile)
+				return readErr
+			}
+		}
 	}
+
 	if err := file.Close(); err != nil {
 		_ = os.Remove(tempFile)
 		return err
@@ -207,6 +305,39 @@ func downloadFile(ctx context.Context, url string, destination string) error {
 	}
 
 	return nil
+}
+
+func renderDownloadProgress(out io.Writer, label string, downloaded int64, total int64) {
+	if total > 0 {
+		percent := float64(downloaded) / float64(total) * 100
+		if percent > 100 {
+			percent = 100
+		}
+		barWidth := 28
+		filled := int(float64(downloaded) / float64(total) * float64(barWidth))
+		if filled > barWidth {
+			filled = barWidth
+		}
+		bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+		fmt.Fprintf(out, "\r%-6s [%s] %5.1f%% %s/%s", label, bar, percent, humanBytes(downloaded), humanBytes(total))
+		return
+	}
+	fmt.Fprintf(out, "\r%-6s downloaded %s", label, humanBytes(downloaded))
+}
+
+func humanBytes(value int64) string {
+	if value < 1024 {
+		return fmt.Sprintf("%dB", value)
+	}
+	units := []string{"KB", "MB", "GB", "TB"}
+	size := float64(value)
+	for _, unit := range units {
+		size /= 1024
+		if size < 1024 {
+			return fmt.Sprintf("%.1f%s", size, unit)
+		}
+	}
+	return fmt.Sprintf("%.1fPB", size/1024)
 }
 
 func prepareRuntimeDisk(basePath, diskPath string) (string, error) {
@@ -362,4 +493,12 @@ func readMetadata(path string) (Metadata, error) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func fileExistsAndNonEmpty(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Size() > 0
 }

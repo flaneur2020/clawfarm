@@ -200,6 +200,10 @@ func (a *App) runRun(args []string) error {
 	if err := ensureDir(statePath); err != nil {
 		return err
 	}
+	instanceImagePath := filepath.Join(instanceDir, "instance.img")
+	if err := copyFile(imageMeta.RuntimeDisk, instanceImagePath); err != nil {
+		return err
+	}
 
 	vmPublished := make([]vm.PortMapping, 0, len(published.Mappings))
 	for _, mapping := range published.Mappings {
@@ -212,7 +216,7 @@ func (a *App) runRun(args []string) error {
 		ImageArch:        imageMeta.Arch,
 		KernelPath:       imageMeta.KernelPath,
 		InitrdPath:       imageMeta.InitrdPath,
-		SourceDiskPath:   imageMeta.RuntimeDisk,
+		SourceDiskPath:   instanceImagePath,
 		WorkspacePath:    workspacePath,
 		StatePath:        statePath,
 		GatewayHostPort:  gatewayPort,
@@ -546,4 +550,37 @@ func normalizeRunArgs(args []string) []string {
 	reordered = append(reordered, args[1:]...)
 	reordered = append(reordered, args[0])
 	return reordered
+}
+
+func copyFile(sourcePath string, destinationPath string) error {
+	sourceFile, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	if err := os.MkdirAll(filepath.Dir(destinationPath), 0o755); err != nil {
+		return err
+	}
+
+	temporaryPath := destinationPath + ".tmp"
+	targetFile, err := os.Create(temporaryPath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(targetFile, sourceFile); err != nil {
+		targetFile.Close()
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	if err := targetFile.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+
+	if err := os.Rename(temporaryPath, destinationPath); err != nil {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	return nil
 }

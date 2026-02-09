@@ -2,6 +2,7 @@ package vm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -328,10 +329,14 @@ func prepareInstanceDisk(sourceDiskPath string, instanceDir string, out io.Write
 	overlayPath := filepath.Join(instanceDir, "rootfs.qcow2")
 	if qemuImgPath, err := exec.LookPath("qemu-img"); err == nil {
 		_ = os.Remove(overlayPath)
-		command := exec.Command(qemuImgPath, "create", "-f", "qcow2", "-F", "raw", "-b", absoluteSourceDiskPath, overlayPath)
+		baseFormat := "raw"
+		if detectedFormat, detectErr := detectSourceDiskFormat(qemuImgPath, absoluteSourceDiskPath); detectErr == nil {
+			baseFormat = detectedFormat
+		}
+		command := exec.Command(qemuImgPath, "create", "-f", "qcow2", "-F", baseFormat, "-b", absoluteSourceDiskPath, overlayPath)
 		output, err := command.CombinedOutput()
 		if err == nil {
-			writeLine(out, "instance disk prepared: %s (qcow2 overlay)", overlayPath)
+			writeLine(out, "instance disk prepared: %s (qcow2 overlay, base=%s)", overlayPath, baseFormat)
 			return overlayPath, "qcow2", nil
 		}
 		writeLine(out, "qemu-img overlay failed, falling back to raw copy: %s", strings.TrimSpace(string(output)))
@@ -343,6 +348,25 @@ func prepareInstanceDisk(sourceDiskPath string, instanceDir string, out io.Write
 	}
 	writeLine(out, "instance disk prepared: %s (raw copy)", rawPath)
 	return rawPath, "raw", nil
+}
+
+func detectSourceDiskFormat(qemuImgPath string, imagePath string) (string, error) {
+	command := exec.Command(qemuImgPath, "info", "--output=json", imagePath)
+	output, err := command.Output()
+	if err != nil {
+		return "", err
+	}
+
+	var payload struct {
+		Format string `json:"format"`
+	}
+	if err := json.Unmarshal(output, &payload); err != nil {
+		return "", err
+	}
+	if payload.Format == "" {
+		return "", errors.New("empty format")
+	}
+	return payload.Format, nil
 }
 
 func createNoCloudSeedISO(spec StartSpec, outputPath string) error {

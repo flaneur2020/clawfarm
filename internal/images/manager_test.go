@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDetectDiskFormatByMagic(t *testing.T) {
@@ -153,7 +154,7 @@ func TestDownloadFile(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "artifact")
-	if err := downloadFile(context.Background(), server.URL, path); err != nil {
+	if err := downloadFile(context.Background(), server.URL, path, nil, ""); err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
 	}
 	body, err := os.ReadFile(path)
@@ -162,5 +163,84 @@ func TestDownloadFile(t *testing.T) {
 	}
 	if string(body) != "payload" {
 		t.Fatalf("unexpected body: %q", string(body))
+	}
+}
+
+func TestDownloadFileWithProgress(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Length", "7")
+		_, _ = writer.Write([]byte("payload"))
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "artifact")
+	var output strings.Builder
+	if err := downloadFile(context.Background(), server.URL, path, &output, "test"); err != nil {
+		t.Fatalf("downloadFile failed: %v", err)
+	}
+	if !strings.Contains(output.String(), "100.0%") {
+		t.Fatalf("expected progress output, got %q", output.String())
+	}
+}
+
+func TestFetchUsesCachedArtifactsWithoutDownloading(t *testing.T) {
+	tmpDir := t.TempDir()
+	manager := NewManager(tmpDir, nil)
+
+	imageDir := filepath.Join(tmpDir, "images", "ubuntu_24.04")
+	if err := os.MkdirAll(imageDir, 0o755); err != nil {
+		t.Fatalf("mkdir image dir: %v", err)
+	}
+
+	kernel := filepath.Join(imageDir, kernelFileName)
+	initrd := filepath.Join(imageDir, initrdFileName)
+	base := filepath.Join(imageDir, baseImageName)
+	disk := filepath.Join(imageDir, runtimeDiskName)
+	for _, path := range []string{kernel, initrd, base, disk} {
+		if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	now := time.Now().UTC()
+	meta := Metadata{
+		Ref:          "ubuntu:24.04",
+		Version:      "24.04",
+		Codename:     "noble",
+		Arch:         runtime.GOARCH,
+		ImageDir:     imageDir,
+		KernelPath:   kernel,
+		InitrdPath:   initrd,
+		BaseImage:    base,
+		RuntimeDisk:  disk,
+		Ready:        true,
+		DiskFormat:   "raw",
+		FetchedAtUTC: now,
+		UpdatedAtUTC: now,
+	}
+	if err := writeMetadata(filepath.Join(imageDir, metadataFileName), meta); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	before, err := os.Stat(kernel)
+	if err != nil {
+		t.Fatalf("stat kernel before: %v", err)
+	}
+
+	result, err := manager.Fetch(context.Background(), "ubuntu:24.04")
+	if err != nil {
+		t.Fatalf("Fetch failed: %v", err)
+	}
+	if result.Ref != "ubuntu:24.04" {
+		t.Fatalf("unexpected ref: %s", result.Ref)
+	}
+
+	after, err := os.Stat(kernel)
+	if err != nil {
+		t.Fatalf("stat kernel after: %v", err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("expected cached artifact unchanged")
 	}
 }
