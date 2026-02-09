@@ -40,6 +40,8 @@ vclaw rm <CLAWID>
 
 The `image ls` table lists supported images and marks whether each image is already downloaded (`yes`/`no`).
 
+`vclaw ps` includes `STATUS` and `LAST_ERROR`; when the VM is running but OpenClaw gateway is unreachable or returns HTTP 5xx, status is shown as `unhealthy`.
+
 Useful `run` flags:
 
 ```bash
@@ -50,6 +52,26 @@ vclaw run ubuntu:24.04 \
   --cpus=2 \
   --memory-mib=4096 \
   --ready-timeout-secs=900
+```
+
+Expanded OpenClaw config flags (equivalent to editing `--openclaw-config`):
+
+```bash
+vclaw run ubuntu:24.04 \
+  --openclaw-agent-workspace /workspace \
+  --openclaw-model-primary openai/gpt-5 \
+  --openclaw-gateway-mode local \
+  --openclaw-gateway-auth-mode token \
+  --openclaw-gateway-token "$OPENCLAW_GATEWAY_TOKEN" \
+  --openclaw-env OPENAI_API_KEY="$OPENAI_API_KEY"
+```
+
+You can also provide file-based inputs:
+
+```bash
+vclaw run ubuntu:24.04 \
+  --openclaw-config ./openclaw.json \
+  --openclaw-env-file ./.env.openclaw
 ```
 
 ## Make targets

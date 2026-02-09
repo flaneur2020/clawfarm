@@ -1,12 +1,15 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,6 +28,7 @@ const (
 	defaultCPUs             = 2
 	defaultMemoryMiB        = 4096
 	defaultReadyTimeoutSecs = 900
+	unhealthyGracePeriod    = 30 * time.Second
 )
 
 type App struct {
@@ -137,7 +141,16 @@ func (a *App) runRun(args []string) error {
 	readyTimeoutSecs := defaultReadyTimeoutSecs
 	noWait := false
 	openClawPackage := "openclaw@latest"
+	openClawConfigPath := ""
+	openClawEnvFile := ""
+	openClawAgentWorkspace := "/workspace"
+	openClawModelPrimary := ""
+	openClawGatewayMode := ""
+	openClawGatewayAuthMode := ""
+	openClawGatewayToken := ""
+	openClawGatewayPassword := ""
 	var published portList
+	var openClawEnvironment envVarList
 
 	flags.StringVar(&workspace, "workspace", ".", "workspace path to mount")
 	flags.IntVar(&gatewayPort, "port", defaultGatewayPort, "host gateway port")
@@ -146,6 +159,15 @@ func (a *App) runRun(args []string) error {
 	flags.IntVar(&readyTimeoutSecs, "ready-timeout-secs", defaultReadyTimeoutSecs, "gateway readiness timeout in seconds")
 	flags.BoolVar(&noWait, "no-wait", false, "start and return without waiting for readiness")
 	flags.StringVar(&openClawPackage, "openclaw-package", "openclaw@latest", "OpenClaw package spec")
+	flags.StringVar(&openClawConfigPath, "openclaw-config", "", "host path to OpenClaw JSON config")
+	flags.StringVar(&openClawEnvFile, "openclaw-env-file", "", "host path to OpenClaw .env file")
+	flags.StringVar(&openClawAgentWorkspace, "openclaw-agent-workspace", "/workspace", "OpenClaw agents.defaults.workspace")
+	flags.StringVar(&openClawModelPrimary, "openclaw-model-primary", "", "OpenClaw agents.defaults.model.primary")
+	flags.StringVar(&openClawGatewayMode, "openclaw-gateway-mode", "", "OpenClaw gateway.mode (example: local)")
+	flags.StringVar(&openClawGatewayAuthMode, "openclaw-gateway-auth-mode", "", "OpenClaw gateway.auth.mode (token|password|none)")
+	flags.StringVar(&openClawGatewayToken, "openclaw-gateway-token", "", "OpenClaw gateway token (maps to OPENCLAW_GATEWAY_TOKEN)")
+	flags.StringVar(&openClawGatewayPassword, "openclaw-gateway-password", "", "OpenClaw gateway password (maps to OPENCLAW_GATEWAY_PASSWORD)")
+	flags.Var(&openClawEnvironment, "openclaw-env", "OpenClaw env override KEY=VALUE (repeatable)")
 	flags.Var(&published, "publish", "host:guest mapping (repeatable)")
 	flags.Var(&published, "port-forward", "alias of --publish (repeatable)")
 
@@ -153,7 +175,7 @@ func (a *App) runRun(args []string) error {
 		return err
 	}
 	if flags.NArg() != 1 {
-		return errors.New("usage: vclaw run <ref> [--workspace=. --port=18789 --publish host:guest]")
+		return errors.New("usage: vclaw run <ref> [--workspace=. --port=18789 --publish host:guest] [--openclaw-config path --openclaw-env-file path --openclaw-env KEY=VALUE]")
 	}
 	if gatewayPort < 1 || gatewayPort > 65535 {
 		return fmt.Errorf("invalid gateway port %d: expected 1-65535", gatewayPort)
@@ -167,6 +189,9 @@ func (a *App) runRun(args []string) error {
 	if readyTimeoutSecs < 1 {
 		return errors.New("ready-timeout-secs must be >= 1")
 	}
+	if openClawGatewayAuthMode != "" && openClawGatewayAuthMode != "token" && openClawGatewayAuthMode != "password" && openClawGatewayAuthMode != "none" {
+		return fmt.Errorf("invalid --openclaw-gateway-auth-mode %q: expected token, password, or none", openClawGatewayAuthMode)
+	}
 
 	workspacePath, err := filepath.Abs(workspace)
 	if err != nil {
@@ -176,6 +201,36 @@ func (a *App) runRun(args []string) error {
 		return fmt.Errorf("workspace %s: %w", workspacePath, err)
 	} else if !info.IsDir() {
 		return fmt.Errorf("workspace %s is not a directory", workspacePath)
+	}
+
+	rawOpenClawConfig, err := loadOpenClawConfig(openClawConfigPath)
+	if err != nil {
+		return err
+	}
+
+	openClawConfig, err := buildOpenClawConfig(rawOpenClawConfig, openClawConfigOptions{
+		AgentWorkspace:  openClawAgentWorkspace,
+		ModelPrimary:    openClawModelPrimary,
+		GatewayMode:     openClawGatewayMode,
+		GatewayPort:     gatewayPort,
+		GatewayAuthMode: openClawGatewayAuthMode,
+	})
+	if err != nil {
+		return err
+	}
+
+	openClawEnv, err := parseOpenClawEnvFile(openClawEnvFile)
+	if err != nil {
+		return err
+	}
+	for key, value := range openClawEnvironment.Values {
+		openClawEnv[key] = value
+	}
+	if openClawGatewayToken != "" {
+		openClawEnv["OPENCLAW_GATEWAY_TOKEN"] = openClawGatewayToken
+	}
+	if openClawGatewayPassword != "" {
+		openClawEnv["OPENCLAW_GATEWAY_PASSWORD"] = openClawGatewayPassword
 	}
 
 	manager, err := a.imageManager()
@@ -217,18 +272,20 @@ func (a *App) runRun(args []string) error {
 	}
 
 	startResult, err := a.backend.Start(context.Background(), vm.StartSpec{
-		InstanceID:       id,
-		InstanceDir:      instanceDir,
-		ImageArch:        imageMeta.Arch,
-		SourceDiskPath:   instanceImagePath,
-		WorkspacePath:    workspacePath,
-		StatePath:        statePath,
-		GatewayHostPort:  gatewayPort,
-		GatewayGuestPort: gatewayPort,
-		PublishedPorts:   vmPublished,
-		CPUs:             cpus,
-		MemoryMiB:        memoryMiB,
-		OpenClawPackage:  openClawPackage,
+		InstanceID:          id,
+		InstanceDir:         instanceDir,
+		ImageArch:           imageMeta.Arch,
+		SourceDiskPath:      instanceImagePath,
+		WorkspacePath:       workspacePath,
+		StatePath:           statePath,
+		GatewayHostPort:     gatewayPort,
+		GatewayGuestPort:    gatewayPort,
+		PublishedPorts:      vmPublished,
+		CPUs:                cpus,
+		MemoryMiB:           memoryMiB,
+		OpenClawPackage:     openClawPackage,
+		OpenClawConfig:      openClawConfig,
+		OpenClawEnvironment: openClawEnv,
 	})
 	if err != nil {
 		return err
@@ -284,6 +341,7 @@ func (a *App) runRun(args []string) error {
 	waitCtx, cancel := context.WithTimeout(context.Background(), time.Duration(readyTimeoutSecs)*time.Second)
 	defer cancel()
 	if err := vm.WaitForHTTP(waitCtx, httpURL); err != nil {
+		instance.Status = "unhealthy"
 		instance.LastError = err.Error()
 		instance.UpdatedAtUTC = time.Now().UTC()
 		if saveErr := store.Save(instance); saveErr != nil {
@@ -332,9 +390,15 @@ func (a *App) runPS(args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(a.out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "CLAWID\tIMAGE\tSTATUS\tGATEWAY\tPID\tUPDATED(UTC)")
+	fmt.Fprintln(tw, "CLAWID\tIMAGE\tSTATUS\tGATEWAY\tPID\tUPDATED(UTC)\tLAST_ERROR")
 	for _, instance := range instances {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t127.0.0.1:%d\t%d\t%s\n", instance.ID, instance.ImageRef, instance.Status, instance.GatewayPort, instance.PID, instance.UpdatedAtUTC.Format(time.RFC3339))
+		lastError := instance.LastError
+		if lastError == "" {
+			lastError = "-"
+		} else {
+			lastError = strings.ReplaceAll(lastError, "\n", " ")
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t127.0.0.1:%d\t%d\t%s\t%s\n", instance.ID, instance.ImageRef, instance.Status, instance.GatewayPort, instance.PID, instance.UpdatedAtUTC.Format(time.RFC3339), lastError)
 	}
 	return tw.Flush()
 }
@@ -359,12 +423,56 @@ func (a *App) reconcileInstanceStatus(instance state.Instance) (state.Instance, 
 		return instance, false
 	}
 
-	if (instance.Status == "booting" || instance.Status == "running") && vm.IsHTTPReachable(fmt.Sprintf("http://127.0.0.1:%d/", instance.GatewayPort), 300*time.Millisecond) {
-		instance.Status = "ready"
-		instance.LastError = ""
-		changed = true
+	url := fmt.Sprintf("http://127.0.0.1:%d/", instance.GatewayPort)
+	isHealthy, healthError := probeGatewayHealth(url, 300*time.Millisecond)
+	if isHealthy {
+		if instance.Status != "ready" || instance.LastError != "" {
+			instance.Status = "ready"
+			instance.LastError = ""
+			changed = true
+		}
+		return instance, changed
+	}
+
+	shouldMarkUnhealthy := false
+	if instance.Status == "ready" {
+		shouldMarkUnhealthy = true
+	}
+	if (instance.Status == "booting" || instance.Status == "running") && (instance.LastError != "" || time.Since(instance.CreatedAtUTC) >= unhealthyGracePeriod) {
+		shouldMarkUnhealthy = true
+	}
+	if instance.Status == "unhealthy" {
+		shouldMarkUnhealthy = true
+	}
+
+	if shouldMarkUnhealthy {
+		if instance.Status != "unhealthy" {
+			instance.Status = "unhealthy"
+			changed = true
+		}
+		if healthError == "" {
+			healthError = "gateway is unreachable"
+		}
+		if instance.LastError != healthError {
+			instance.LastError = healthError
+			changed = true
+		}
 	}
 	return instance, changed
+}
+
+func probeGatewayHealth(url string, timeout time.Duration) (bool, string) {
+	client := &http.Client{Timeout: timeout}
+	response, err := client.Get(url)
+	if err != nil {
+		return false, err.Error()
+	}
+	_ = response.Body.Close()
+
+	if response.StatusCode >= 200 && response.StatusCode < 500 {
+		return true, ""
+	}
+	return false, fmt.Sprintf("gateway returned HTTP %d", response.StatusCode)
 }
 
 func (a *App) runSuspend(args []string) error {
@@ -495,6 +603,9 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.out, "  vclaw image ls")
 	fmt.Fprintln(a.out, "  vclaw image fetch <ref>")
 	fmt.Fprintln(a.out, "  vclaw run <ref> [--workspace=. --port=18789 --publish host:guest]")
+	fmt.Fprintln(a.out, "             [--openclaw-config path --openclaw-agent-workspace /workspace --openclaw-model-primary openai/gpt-5]")
+	fmt.Fprintln(a.out, "             [--openclaw-gateway-mode local --openclaw-gateway-auth-mode token --openclaw-gateway-token xxx]")
+	fmt.Fprintln(a.out, "             [--openclaw-env-file path --openclaw-env KEY=VALUE]")
 	fmt.Fprintln(a.out, "  vclaw ps")
 	fmt.Fprintln(a.out, "  vclaw suspend <clawid>")
 	fmt.Fprintln(a.out, "  vclaw resume <clawid>")
@@ -503,6 +614,7 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.out, "Examples:")
 	fmt.Fprintln(a.out, "  vclaw image fetch ubuntu:24.04")
 	fmt.Fprintln(a.out, "  vclaw run ubuntu:24.04 --workspace=. --publish 8080:80")
+	fmt.Fprintln(a.out, "  vclaw run ubuntu:24.04 --openclaw-env OPENAI_API_KEY=$OPENAI_API_KEY")
 }
 
 type portList struct {
@@ -541,6 +653,184 @@ func parsePortMapping(input string) (state.PortMapping, error) {
 		return state.PortMapping{}, fmt.Errorf("ports must be within 1-65535")
 	}
 	return state.PortMapping{HostPort: host, GuestPort: guest}, nil
+}
+
+type envVarList struct {
+	Values map[string]string
+}
+
+func (l *envVarList) String() string {
+	return ""
+}
+
+func (l *envVarList) Set(value string) error {
+	key, parsedValue, err := parseEnvAssignment(value)
+	if err != nil {
+		return err
+	}
+	if l.Values == nil {
+		l.Values = map[string]string{}
+	}
+	l.Values[key] = parsedValue
+	return nil
+}
+
+type openClawConfigOptions struct {
+	AgentWorkspace  string
+	ModelPrimary    string
+	GatewayMode     string
+	GatewayPort     int
+	GatewayAuthMode string
+}
+
+func loadOpenClawConfig(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", nil
+	}
+
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read --openclaw-config %s: %w", path, err)
+	}
+	if strings.TrimSpace(string(contents)) == "" {
+		return "", fmt.Errorf("--openclaw-config %s is empty", path)
+	}
+	return string(contents), nil
+}
+
+func buildOpenClawConfig(baseConfig string, options openClawConfigOptions) (string, error) {
+	config := map[string]interface{}{}
+	if strings.TrimSpace(baseConfig) != "" {
+		if err := json.Unmarshal([]byte(baseConfig), &config); err != nil {
+			return "", fmt.Errorf("parse --openclaw-config JSON: %w", err)
+		}
+	}
+
+	agents := ensureMapValue(config, "agents")
+	defaults := ensureMapValue(agents, "defaults")
+	workspace := options.AgentWorkspace
+	if strings.TrimSpace(workspace) == "" {
+		workspace = "/workspace"
+	}
+	defaults["workspace"] = workspace
+	if strings.TrimSpace(options.ModelPrimary) != "" {
+		model := ensureMapValue(defaults, "model")
+		model["primary"] = options.ModelPrimary
+	}
+
+	gateway := ensureMapValue(config, "gateway")
+	if options.GatewayPort > 0 {
+		gateway["port"] = options.GatewayPort
+	}
+	if _, exists := gateway["mode"]; !exists {
+		gateway["mode"] = "local"
+	}
+	if strings.TrimSpace(options.GatewayMode) != "" {
+		gateway["mode"] = options.GatewayMode
+	}
+	if strings.TrimSpace(options.GatewayAuthMode) != "" {
+		auth := ensureMapValue(gateway, "auth")
+		auth["mode"] = options.GatewayAuthMode
+	}
+
+	payload, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+func ensureMapValue(root map[string]interface{}, key string) map[string]interface{} {
+	value, exists := root[key]
+	if !exists {
+		next := map[string]interface{}{}
+		root[key] = next
+		return next
+	}
+	mapValue, ok := value.(map[string]interface{})
+	if ok {
+		return mapValue
+	}
+	next := map[string]interface{}{}
+	root[key] = next
+	return next
+}
+
+func parseOpenClawEnvFile(path string) (map[string]string, error) {
+	result := map[string]string{}
+	if strings.TrimSpace(path) == "" {
+		return result, nil
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read --openclaw-env-file %s: %w", path, err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	lineNumber := 0
+	for scanner.Scan() {
+		lineNumber++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+
+		key, value, parseErr := parseEnvAssignment(line)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse --openclaw-env-file %s line %d: %w", path, lineNumber, parseErr)
+		}
+		result[key] = stripMatchingQuotes(value)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read --openclaw-env-file %s: %w", path, err)
+	}
+	return result, nil
+}
+
+func parseEnvAssignment(input string) (string, string, error) {
+	parts := strings.SplitN(input, "=", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid env assignment %q: expected KEY=VALUE", input)
+	}
+
+	key := strings.TrimSpace(parts[0])
+	if !isValidEnvKey(key) {
+		return "", "", fmt.Errorf("invalid env key %q", key)
+	}
+	return key, parts[1], nil
+}
+
+func isValidEnvKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for index, char := range key {
+		if index == 0 {
+			if !((char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') || char == '_') {
+				return false
+			}
+			continue
+		}
+		if !((char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func stripMatchingQuotes(value string) string {
+	if len(value) < 2 {
+		return value
+	}
+	if (value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"') {
+		return value[1 : len(value)-1]
+	}
+	return value
 }
 
 func normalizeRunArgs(args []string) []string {

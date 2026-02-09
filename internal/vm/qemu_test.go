@@ -47,6 +47,28 @@ func TestBuildCloudInitUserData(t *testing.T) {
 	}
 }
 
+func TestBuildBootstrapScriptWithConfigAndEnv(t *testing.T) {
+	spec := StartSpec{
+		GatewayGuestPort:    18789,
+		OpenClawPackage:     "openclaw@latest",
+		OpenClawConfig:      `{"gateway":{"mode":"local","port":18789}}`,
+		OpenClawEnvironment: map[string]string{"OPENAI_API_KEY": "abc123", "OPENCLAW_GATEWAY_TOKEN": "token-value"},
+	}
+	script := buildBootstrapScript(spec)
+
+	for _, expected := range []string{
+		"/etc/vclaw/openclaw.env",
+		"source /etc/vclaw/openclaw.env",
+		"OPENAI_API_KEY",
+		"OPENCLAW_GATEWAY_TOKEN",
+		"\"gateway\":{\"mode\":\"local\",\"port\":18789}",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("bootstrap script missing %q", expected)
+		}
+	}
+}
+
 func TestIndentForCloudConfig(t *testing.T) {
 	content := "line1\nline2\n"
 	indented := indentForCloudConfig(content, 4)

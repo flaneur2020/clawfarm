@@ -17,19 +17,20 @@ type PortMapping struct {
 }
 
 type StartSpec struct {
-	InstanceID        string
-	InstanceDir       string
-	ImageArch         string
-	SourceDiskPath    string
-	WorkspacePath     string
-	StatePath         string
-	GatewayHostPort   int
-	GatewayGuestPort  int
-	PublishedPorts    []PortMapping
-	CPUs              int
-	MemoryMiB         int
-	OpenClawPackage   string
-	OpenClawConfigArg string
+	InstanceID          string
+	InstanceDir         string
+	ImageArch           string
+	SourceDiskPath      string
+	WorkspacePath       string
+	StatePath           string
+	GatewayHostPort     int
+	GatewayGuestPort    int
+	PublishedPorts      []PortMapping
+	CPUs                int
+	MemoryMiB           int
+	OpenClawPackage     string
+	OpenClawConfig      string
+	OpenClawEnvironment map[string]string
 }
 
 type StartResult struct {

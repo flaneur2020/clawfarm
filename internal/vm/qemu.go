@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -472,6 +473,23 @@ func buildBootstrapScript(spec StartSpec) string {
 		packageName = "openclaw@latest"
 	}
 
+	openClawConfig := strings.TrimSpace(spec.OpenClawConfig)
+	if openClawConfig == "" {
+		openClawConfig = fmt.Sprintf(`{
+  "agents": {
+    "defaults": {
+      "workspace": "/workspace"
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "port": %d
+  }
+}`, spec.GatewayGuestPort)
+	}
+
+	openClawEnv := renderOpenClawEnvironment(spec.OpenClawEnvironment)
+
 	return fmt.Sprintf(`#!/usr/bin/env bash
 set -euxo pipefail
 
@@ -488,18 +506,14 @@ if ! mountpoint -q /root/.openclaw; then
   mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 state /root/.openclaw || true
 fi
 
-cat >/etc/vclaw/openclaw.json <<'JSON'
-{
-  "agents": {
-    "defaults": {
-      "workspace": "/workspace"
-    }
-  },
-  "gateway": {
-    "port": %d
-  }
-}
-JSON
+cat >/etc/vclaw/openclaw.json <<'VCLAW_OPENCLAW_JSON'
+%s
+VCLAW_OPENCLAW_JSON
+
+cat >/etc/vclaw/openclaw.env <<'VCLAW_OPENCLAW_ENV'
+%s
+VCLAW_OPENCLAW_ENV
+chmod 0600 /etc/vclaw/openclaw.env
 
 cat >/usr/local/bin/vclaw-gateway.sh <<'SCRIPT'
 #!/usr/bin/env bash
@@ -507,6 +521,11 @@ set -euo pipefail
 
 export HOME=/root
 export OPENCLAW_CONFIG_PATH=/etc/vclaw/openclaw.json
+if [[ -f /etc/vclaw/openclaw.env ]]; then
+  set -a
+  source /etc/vclaw/openclaw.env
+  set +a
+fi
 
 if command -v openclaw >/dev/null 2>&1; then
   exec openclaw gateway --allow-unconfigured --port %d
@@ -549,7 +568,29 @@ if ! command -v openclaw >/dev/null 2>&1; then
     systemctl restart vclaw-gateway.service
   ) >/var/log/vclaw-openclaw-install.log 2>&1 &
 fi
-`, spec.GatewayGuestPort, spec.GatewayGuestPort, spec.GatewayGuestPort, packageName)
+`, openClawConfig, openClawEnv, spec.GatewayGuestPort, spec.GatewayGuestPort, packageName)
+}
+
+func renderOpenClawEnvironment(values map[string]string) string {
+	if len(values) == 0 {
+		return "# no extra environment overrides"
+	}
+
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, fmt.Sprintf("export %s=%s", key, shellSingleQuote(values[key])))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func indentForCloudConfig(content string, spaces int) string {
