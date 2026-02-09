@@ -16,9 +16,8 @@ import (
 )
 
 const (
-	imageFileName     = "image.img"
-	legacyRuntimeDisk = "disk.raw"
-	metadataFileName  = "image.json"
+	imageFileName    = "image.img"
+	metadataFileName = "image.json"
 )
 
 var ErrImageNotFetched = errors.New("image not fetched")
@@ -171,18 +170,16 @@ func (m *Manager) Fetch(ctx context.Context, ref string) (Metadata, error) {
 	}
 
 	diskPath := filepath.Join(imageDir, imageFileName)
-	legacyPath := filepath.Join(imageDir, legacyRuntimeDisk)
 	metaPath := filepath.Join(imageDir, metadataFileName)
 
-	availableDisk := resolveCachedDiskPath(diskPath, legacyPath)
-	if availableDisk != "" {
+	if fileExistsAndNonEmpty(diskPath) {
 		cachedMeta, err := readMetadata(metaPath)
 		if err == nil {
 			cachedMeta = normalizeMetadata(imageDir, cachedMeta)
-			cachedMeta.RuntimeDisk = availableDisk
+			cachedMeta.RuntimeDisk = diskPath
 			cachedMeta.Ready = true
 			if cachedMeta.DiskFormat == "" {
-				cachedMeta.DiskFormat = detectDownloadedDiskFormat(availableDisk)
+				cachedMeta.DiskFormat = detectDownloadedDiskFormat(diskPath)
 			}
 			if m.stdout != nil {
 				fmt.Fprintf(m.stdout, "using cached image %s\n", cachedMeta.Ref)
@@ -201,9 +198,9 @@ func (m *Manager) Fetch(ctx context.Context, ref string) (Metadata, error) {
 			Date:         parsed.Date,
 			Arch:         parsed.Arch,
 			ImageDir:     imageDir,
-			RuntimeDisk:  availableDisk,
+			RuntimeDisk:  diskPath,
 			Ready:        true,
-			DiskFormat:   detectDownloadedDiskFormat(availableDisk),
+			DiskFormat:   detectDownloadedDiskFormat(diskPath),
 			FetchedAtUTC: now,
 			UpdatedAtUTC: now,
 		}
@@ -250,12 +247,7 @@ func normalizeMetadata(imageDir string, meta Metadata) Metadata {
 	if meta.ImageDir == "" {
 		meta.ImageDir = imageDir
 	}
-	if meta.RuntimeDisk == "" {
-		meta.RuntimeDisk = resolveCachedDiskPath(filepath.Join(imageDir, imageFileName), filepath.Join(imageDir, legacyRuntimeDisk))
-	}
-	if meta.RuntimeDisk == "" {
-		meta.RuntimeDisk = filepath.Join(imageDir, imageFileName)
-	}
+	meta.RuntimeDisk = filepath.Join(imageDir, imageFileName)
 	if meta.Arch == "" && meta.Ref != "" {
 		if parsed, err := ParseUbuntuRef(meta.Ref); err == nil {
 			meta.Arch = parsed.Arch
@@ -271,16 +263,6 @@ func normalizeMetadata(imageDir string, meta Metadata) Metadata {
 		}
 	}
 	return meta
-}
-
-func resolveCachedDiskPath(primaryPath string, legacyPath string) string {
-	if fileExistsAndNonEmpty(primaryPath) {
-		return primaryPath
-	}
-	if fileExistsAndNonEmpty(legacyPath) {
-		return legacyPath
-	}
-	return ""
 }
 
 func ensureDownloadedFile(ctx context.Context, url string, destination string, out io.Writer, label string) error {
