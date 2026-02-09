@@ -26,6 +26,15 @@ type Instance struct {
 	GatewayPort    int           `json:"gateway_port"`
 	PublishedPorts []PortMapping `json:"published_ports"`
 	Status         string        `json:"status"`
+	Backend        string        `json:"backend"`
+	PID            int           `json:"pid,omitempty"`
+	DiskPath       string        `json:"disk_path,omitempty"`
+	SeedISOPath    string        `json:"seed_iso_path,omitempty"`
+	SerialLogPath  string        `json:"serial_log_path,omitempty"`
+	QEMULogPath    string        `json:"qemu_log_path,omitempty"`
+	MonitorPath    string        `json:"monitor_path,omitempty"`
+	QEMUAccel      string        `json:"qemu_accel,omitempty"`
+	LastError      string        `json:"last_error,omitempty"`
 	CreatedAtUTC   time.Time     `json:"created_at_utc"`
 	UpdatedAtUTC   time.Time     `json:"updated_at_utc"`
 }
@@ -39,11 +48,11 @@ func NewStore(root string) *Store {
 }
 
 func (s *Store) Save(instance Instance) error {
-	dir := filepath.Join(s.root, instance.ID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	directory := filepath.Join(s.root, instance.ID)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return err
 	}
-	file, err := os.Create(filepath.Join(dir, metadataFileName))
+	file, err := os.Create(filepath.Join(directory, metadataFileName))
 	if err != nil {
 		return err
 	}
@@ -103,12 +112,12 @@ func (s *Store) List() ([]Instance, error) {
 }
 
 func (s *Store) Delete(id string) error {
-	dir := filepath.Join(s.root, id)
-	if _, err := os.Stat(dir); err != nil {
+	directory := filepath.Join(s.root, id)
+	if _, err := os.Stat(directory); err != nil {
 		if os.IsNotExist(err) {
 			return ErrNotFound
 		}
 		return err
 	}
-	return os.RemoveAll(dir)
+	return os.RemoveAll(directory)
 }

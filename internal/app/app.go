@@ -17,17 +17,28 @@ import (
 	"github.com/yazhou/krunclaw/internal/config"
 	"github.com/yazhou/krunclaw/internal/images"
 	"github.com/yazhou/krunclaw/internal/state"
+	"github.com/yazhou/krunclaw/internal/vm"
 )
 
-const defaultGatewayPort = 18789
+const (
+	defaultGatewayPort      = 18789
+	defaultCPUs             = 2
+	defaultMemoryMiB        = 4096
+	defaultReadyTimeoutSecs = 900
+)
 
 type App struct {
-	out    io.Writer
-	errOut io.Writer
+	out     io.Writer
+	errOut  io.Writer
+	backend vm.Backend
 }
 
 func New(out io.Writer, errOut io.Writer) *App {
-	return &App{out: out, errOut: errOut}
+	return NewWithBackend(out, errOut, vm.NewQEMUBackend(out))
+}
+
+func NewWithBackend(out io.Writer, errOut io.Writer, backend vm.Backend) *App {
+	return &App{out: out, errOut: errOut, backend: backend}
 }
 
 func (a *App) Run(args []string) error {
@@ -115,10 +126,20 @@ func (a *App) runRun(args []string) error {
 
 	workspace := "."
 	gatewayPort := defaultGatewayPort
+	cpus := defaultCPUs
+	memoryMiB := defaultMemoryMiB
+	readyTimeoutSecs := defaultReadyTimeoutSecs
+	noWait := false
+	openClawPackage := "openclaw@latest"
 	var published portList
 
 	flags.StringVar(&workspace, "workspace", ".", "workspace path to mount")
 	flags.IntVar(&gatewayPort, "port", defaultGatewayPort, "host gateway port")
+	flags.IntVar(&cpus, "cpus", defaultCPUs, "vCPU count")
+	flags.IntVar(&memoryMiB, "memory-mib", defaultMemoryMiB, "memory size in MiB")
+	flags.IntVar(&readyTimeoutSecs, "ready-timeout-secs", defaultReadyTimeoutSecs, "gateway readiness timeout in seconds")
+	flags.BoolVar(&noWait, "no-wait", false, "start and return without waiting for readiness")
+	flags.StringVar(&openClawPackage, "openclaw-package", "openclaw@latest", "OpenClaw package spec")
 	flags.Var(&published, "publish", "host:guest mapping (repeatable)")
 	flags.Var(&published, "port-forward", "alias of --publish (repeatable)")
 
@@ -130,6 +151,15 @@ func (a *App) runRun(args []string) error {
 	}
 	if gatewayPort < 1 || gatewayPort > 65535 {
 		return fmt.Errorf("invalid gateway port %d: expected 1-65535", gatewayPort)
+	}
+	if cpus < 1 {
+		return errors.New("cpus must be >= 1")
+	}
+	if memoryMiB < 512 {
+		return errors.New("memory-mib must be >= 512")
+	}
+	if readyTimeoutSecs < 1 {
+		return errors.New("ready-timeout-secs must be >= 1")
 	}
 
 	workspacePath, err := filepath.Abs(workspace)
@@ -148,7 +178,8 @@ func (a *App) runRun(args []string) error {
 	}
 
 	ref := flags.Arg(0)
-	if _, err := manager.Resolve(ref); err != nil {
+	imageMeta, err := manager.Resolve(ref)
+	if err != nil {
 		if errors.Is(err, images.ErrImageNotFetched) {
 			return fmt.Errorf("image %s is not ready, run `vclaw image fetch %s` first", ref, ref)
 		}
@@ -170,6 +201,31 @@ func (a *App) runRun(args []string) error {
 		return err
 	}
 
+	vmPublished := make([]vm.PortMapping, 0, len(published.Mappings))
+	for _, mapping := range published.Mappings {
+		vmPublished = append(vmPublished, vm.PortMapping{HostPort: mapping.HostPort, GuestPort: mapping.GuestPort})
+	}
+
+	startResult, err := a.backend.Start(context.Background(), vm.StartSpec{
+		InstanceID:       id,
+		InstanceDir:      instanceDir,
+		ImageArch:        imageMeta.Arch,
+		KernelPath:       imageMeta.KernelPath,
+		InitrdPath:       imageMeta.InitrdPath,
+		SourceDiskPath:   imageMeta.RuntimeDisk,
+		WorkspacePath:    workspacePath,
+		StatePath:        statePath,
+		GatewayHostPort:  gatewayPort,
+		GatewayGuestPort: gatewayPort,
+		PublishedPorts:   vmPublished,
+		CPUs:             cpus,
+		MemoryMiB:        memoryMiB,
+		OpenClawPackage:  openClawPackage,
+	})
+	if err != nil {
+		return err
+	}
+
 	now := time.Now().UTC()
 	instance := state.Instance{
 		ID:             id,
@@ -178,26 +234,64 @@ func (a *App) runRun(args []string) error {
 		StatePath:      statePath,
 		GatewayPort:    gatewayPort,
 		PublishedPorts: published.Mappings,
-		Status:         "running",
+		Status:         "booting",
+		Backend:        "qemu",
+		PID:            startResult.PID,
+		DiskPath:       startResult.DiskPath,
+		SeedISOPath:    startResult.SeedISOPath,
+		SerialLogPath:  startResult.SerialLogPath,
+		QEMULogPath:    startResult.QEMULogPath,
+		MonitorPath:    startResult.MonitorPath,
+		QEMUAccel:      startResult.Accel,
 		CreatedAtUTC:   now,
 		UpdatedAtUTC:   now,
 	}
-
+	if noWait {
+		instance.Status = "running"
+	}
 	if err := store.Save(instance); err != nil {
 		return err
 	}
 
 	fmt.Fprintf(a.out, "CLAWID: %s\n", id)
-	fmt.Fprintf(a.out, "image: %s\n", ref)
+	fmt.Fprintf(a.out, "image: %s (%s)\n", ref, imageMeta.Arch)
 	fmt.Fprintf(a.out, "workspace: %s\n", workspacePath)
 	fmt.Fprintf(a.out, "state: %s\n", statePath)
 	fmt.Fprintf(a.out, "gateway: http://127.0.0.1:%d/\n", gatewayPort)
+	fmt.Fprintf(a.out, "vm pid: %d\n", startResult.PID)
+	fmt.Fprintf(a.out, "serial log: %s\n", startResult.SerialLogPath)
 	if len(instance.PublishedPorts) > 0 {
 		for _, mapping := range instance.PublishedPorts {
 			fmt.Fprintf(a.out, "publish: 127.0.0.1:%d -> %d\n", mapping.HostPort, mapping.GuestPort)
 		}
 	}
-	fmt.Fprintln(a.out, "note: VM bootstrap is tracked for RFC-001 milestones M3-M5")
+
+	if noWait {
+		fmt.Fprintln(a.out, "status: running (not waiting for gateway readiness)")
+		return nil
+	}
+
+	address := fmt.Sprintf("127.0.0.1:%d", gatewayPort)
+	httpURL := fmt.Sprintf("http://%s/", address)
+	waitCtx, cancel := context.WithTimeout(context.Background(), time.Duration(readyTimeoutSecs)*time.Second)
+	defer cancel()
+	if err := vm.WaitForHTTP(waitCtx, httpURL); err != nil {
+		instance.LastError = err.Error()
+		instance.UpdatedAtUTC = time.Now().UTC()
+		if saveErr := store.Save(instance); saveErr != nil {
+			return fmt.Errorf("%w (also failed to save instance state: %v)", err, saveErr)
+		}
+		return fmt.Errorf("gateway is not reachable yet at %s (%v); check %s", httpURL, err, instance.SerialLogPath)
+	}
+
+	instance.Status = "ready"
+	instance.LastError = ""
+	instance.UpdatedAtUTC = time.Now().UTC()
+	if err := store.Save(instance); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(a.out, "status: ready (%s)\n", httpURL)
 	return nil
 }
 
@@ -218,29 +312,68 @@ func (a *App) runPS(args []string) error {
 		return nil
 	}
 
+	for index := range instances {
+		updated, changed := a.reconcileInstanceStatus(instances[index])
+		if changed {
+			updated.UpdatedAtUTC = time.Now().UTC()
+			if err := store.Save(updated); err != nil {
+				return err
+			}
+			instances[index] = updated
+		}
+	}
+
 	tw := tabwriter.NewWriter(a.out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "CLAWID\tIMAGE\tSTATUS\tGATEWAY\tUPDATED(UTC)")
+	fmt.Fprintln(tw, "CLAWID\tIMAGE\tSTATUS\tGATEWAY\tPID\tUPDATED(UTC)")
 	for _, instance := range instances {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t127.0.0.1:%d\t%s\n", instance.ID, instance.ImageRef, instance.Status, instance.GatewayPort, instance.UpdatedAtUTC.Format(time.RFC3339))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t127.0.0.1:%d\t%d\t%s\n", instance.ID, instance.ImageRef, instance.Status, instance.GatewayPort, instance.PID, instance.UpdatedAtUTC.Format(time.RFC3339))
 	}
 	return tw.Flush()
+}
+
+func (a *App) reconcileInstanceStatus(instance state.Instance) (state.Instance, bool) {
+	if instance.PID <= 0 {
+		return instance, false
+	}
+
+	changed := false
+	isRunning := a.backend.IsRunning(instance.PID)
+	if !isRunning && instance.Status != "exited" {
+		instance.Status = "exited"
+		changed = true
+		return instance, changed
+	}
+	if !isRunning {
+		return instance, false
+	}
+
+	if instance.Status == "suspended" {
+		return instance, false
+	}
+
+	if (instance.Status == "booting" || instance.Status == "running") && vm.IsHTTPReachable(fmt.Sprintf("http://127.0.0.1:%d/", instance.GatewayPort), 300*time.Millisecond) {
+		instance.Status = "ready"
+		instance.LastError = ""
+		changed = true
+	}
+	return instance, changed
 }
 
 func (a *App) runSuspend(args []string) error {
 	if len(args) != 1 {
 		return errors.New("usage: vclaw suspend <clawid>")
 	}
-	return a.updateInstanceStatus(args[0], "suspended")
+	return a.updateInstanceStateWithSignal(args[0], "suspended")
 }
 
 func (a *App) runResume(args []string) error {
 	if len(args) != 1 {
 		return errors.New("usage: vclaw resume <clawid>")
 	}
-	return a.updateInstanceStatus(args[0], "running")
+	return a.updateInstanceStateWithSignal(args[0], "running")
 }
 
-func (a *App) updateInstanceStatus(id string, status string) error {
+func (a *App) updateInstanceStateWithSignal(id string, status string) error {
 	store, _, err := a.instanceStore()
 	if err != nil {
 		return err
@@ -252,6 +385,20 @@ func (a *App) updateInstanceStatus(id string, status string) error {
 			return fmt.Errorf("instance %s not found", id)
 		}
 		return err
+	}
+
+	if instance.PID <= 0 {
+		return fmt.Errorf("instance %s has no running process", id)
+	}
+
+	if status == "suspended" {
+		if err := a.backend.Suspend(instance.PID); err != nil {
+			return err
+		}
+	} else {
+		if err := a.backend.Resume(instance.PID); err != nil {
+			return err
+		}
 	}
 
 	instance.Status = status
@@ -271,6 +418,23 @@ func (a *App) runRemove(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	instance, err := store.Load(args[0])
+	if err != nil {
+		if errors.Is(err, state.ErrNotFound) {
+			return fmt.Errorf("instance %s not found", args[0])
+		}
+		return err
+	}
+
+	if instance.PID > 0 && a.backend.IsRunning(instance.PID) {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		defer cancel()
+		if err := a.backend.Stop(stopCtx, instance.PID); err != nil {
+			return err
+		}
+	}
+
 	if err := store.Delete(args[0]); err != nil {
 		if errors.Is(err, state.ErrNotFound) {
 			return fmt.Errorf("instance %s not found", args[0])
