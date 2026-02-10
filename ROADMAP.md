@@ -1,214 +1,187 @@
-# ROADMAP — Clawfarm / Clawbox（分阶段落地计划）
+# ROADMAP — Clawfarm / Clawbox（RFC-004 / RFC-005 对齐版）
 
-## 0) 目标
+## 0) 基线与目标
 
-基于 `rfc/003-clawfarm-gui-first-and-clawbox-format.md`，按“可运行、可验证、可回退”的方式，把现有 `vclaw` 演进到 `clawfarm`：
+本 roadmap 以以下 RFC 为准：
 
-- GUI-first（CLI 仍完整可用）
-- `Clawbox` 可分享格式
-- `new / run / ps / view / save` 闭环
-- `.env` 外置、TUI 引导输入、启动前强校验
-- `save` 脱敏扫描
+- `rfc/004-clawbox-mountable-single-file-format.md`
+- `rfc/005-clawbox-mount-lifecycle-and-locking.md`
 
----
+核心架构约束（已定版）：
 
-## 1) 执行原则
-
-- **小步快跑**：每个里程碑都可单独发布。
-- **先可用再扩展**：先做目录版 `.clawbox`（`spec.json` + artifacts），后续再做单文件封装。
-- **Fail-fast**：必填参数缺失/非法，必须在建 VM 前报错。
-- **安全默认**：secrets 不写入 clawbox，交互输入默认掩码，导出默认脱敏阻断。
-- **每步可验证**：每个里程碑必须包含测试与验收命令。
+1. `clawbox` 是单文件分发格式；
+2. 运行时挂载到 `~/.clawfarm/claws/{CLAWID}/mount`（只读）；
+3. `CLAWID` 来自 `name + inode hash`；
+4. 并发互斥仅使用单一锁文件：`instance.flock`（`github.com/gofrs/flock`）；
+5. `state.json` 仅用于状态展示，不参与占用判定；
+6. 导出命令统一为 `export`（不再使用 `save` 命名）。
 
 ---
 
-## 2) 里程碑拆分
+## 1) 当前进度快照（2026-02-10）
 
-## M0 — 稳定基线（1 次提交）
-
-**目标**：在当前稳定代码上建立实施分支基线。
-
-- 保持现有命令可用：`run/image/ps/suspend/resume/rm`
-- 全量测试为绿
-- 文档补齐：标注“RFC-003 roadmap 进行中”
-
-**验收**
-
-- `go test ./...` 全绿
-- `make test` 全绿
+- ✅ **M1 已完成**：`internal/clawbox` 规格解析/校验（含 `CLAWID` 计算）
+  - `internal/clawbox/spec.go`
+  - `internal/clawbox/spec_test.go`
+- ✅ **M2 基础已完成**：`internal/mount` 单锁模型基础设施
+  - `internal/mount/manager.go`
+  - `internal/mount/flock_locker.go`
+  - `internal/mount/manager_test.go`
+- ✅ Go 版本基线已升级到 `go 1.24.x`
+- 🟡 **下一步重点**：把 `internal/mount` 接入 `run/rm/export/checkpoint/restore` 的真实流程
 
 ---
 
-## M1 — Clawbox 规格与 I/O（核心基础）
+## 2) 里程碑拆分（更新版）
 
-**目标**：实现 `spec.json` 的读写/校验能力。
+## M2 — Mount lifecycle 接入 CLI（进行中）
+
+**目标**：把 RFC-005 的单锁模型接入现有命令路径。
 
 **交付**
 
-- 新增 `internal/clawbox`：
-  - `Spec` 数据结构
-  - `Load/Save/Validate`
-  - schema version 检查
-- 先支持“目录格式” clawbox（如 `demo.clawbox/`）
+- `run` 进入关键区前 `TryLock(instance.flock)`；
+- `run` 在锁内完成挂载复用/冲突检查与 `state.json` 更新；
+- `rm`（以及后续 stop 路径）在锁内释放挂载并更新状态；
+- busy / mount conflict 以明确错误返回。
 
 **验收**
 
-- 单元测试覆盖：合法、缺字段、非法字段、版本不兼容
-- 可以读写：`demo.clawbox/spec.json`
+- 并发 `run` 同一 `CLAWID`：一个成功，一个 `ErrBusy`；
+- `state.json.active=true` 但锁可获取时，不会阻塞新 `run`；
+- `go test ./...` 全绿。
 
 ---
 
-## M2 — `clawfarm new`（TUI 向导 + 模板生成）
+## M3 — `run <file.clawbox>` 端到端
 
-**目标**：可创建可运行的 clawbox 草稿与 `.env` 模板。
+**目标**：从 `.clawbox` 文件直接启动。
 
 **交付**
 
-- 新命令：`clawfarm new`
-- 支持参数：
-  - `--output demo.clawbox`
-  - `--env-output .env`
-  - `--image-ref ubuntu:24.04`
-  - `--model-primary openai/gpt-5`
-  - `--gateway-auth-mode token|password|none`
-  - `--with-discord/--with-telegram/--with-whatsapp`
-- 若关键参数缺失，进入 TUI 引导
-- 输出：
-  - `demo.clawbox/spec.json`
-  - `.env`（占位）
+- `run demo.clawbox --env .env`；
+- `run .`（当前目录唯一 `.clawbox` 自动发现）；
+- 读取 header → 校验 → 计算 `CLAWID`；
+- 挂载路径固定：`~/.clawfarm/claws/{CLAWID}/mount`；
+- 复用现有 VM 启动链路。
 
 **验收**
 
-- `clawfarm new` 在交互与非交互两种模式可工作
-- 生成产物可通过 `clawbox.Validate`
+- 给定合法 `.clawbox` 可启动；
+- 多个 `.clawbox` 场景提示用户显式选择；
+- `go test ./...` + 关键集成测试通过。
 
 ---
 
-## M3 — `clawfarm run <bundle> --env`（复用现有 VM 路径）
+## M4 — OpenClaw preflight + TUI 引导
 
-**目标**：支持从 clawbox 启动实例。
+**目标**：启动前完成必填参数校验，失败要 fail-fast。
 
 **交付**
 
-- `clawfarm run demo.clawbox --env .env`
-- 兼容：`clawfarm run .`（自动发现当前目录 clawbox）
-- 解析 `spec.base_image.ref` → 复用现有 image manager 和 VM 启动链路
-- 环境变量优先级：
-  1. 显式 flags
-  2. `--openclaw-env`
-  3. `--env` / `--openclaw-env-file`
-- 必填 env（来自 `spec.openclaw.required_env`）缺失时：
-  - 交互模式：TUI 逐项输入（secret 显示 `*`）
-  - 非交互模式：直接报错
+- 从 `spec.openclaw.required_env` 读取必填项；
+- 缺失时交互式 TUI 逐项输入（密钥掩码 `*`）；
+- 非交互模式缺参直接失败；
+- 合法性检查在建 VM 前完成。
 
 **验收**
 
-- 缺参时 VM 不会启动（fail-fast）
-- 提供完整参数时实例可启动并在 `ps` 可见
+- 缺参时 VM 不会启动；
+- 参数齐全时实例可启动并在 `ps` 中可见；
+- 异常实例在 `ps` 可见且状态明确。
 
 ---
 
-## M4 — `clawfarm ps` / `clawfarm view`（可观测性）
+## M5 — `export` / `checkpoint` / `restore`
 
-**目标**：增强实例可视化信息。
+**目标**：实现可导出、可回滚的运行闭环。
 
 **交付**
 
-- `ps`：延续健康状态 + 错误摘要
-- `view <clawid>`：实例详情（image、状态、端口、日志路径、错误）
+- `export <CLAWID> <output.clawbox>`；
+- `checkpoint <CLAWID> --name <name>`；
+- `restore <CLAWID> <checkpoint>`；
+- 三者均在锁保护下执行；
+- `export` 支持脱敏扫描，后续可扩展 `--squash`。
 
 **验收**
 
-- `view` 对存在/不存在实例行为清晰
-- 健康状态流转（ready/unhealthy/exited）持续可用
+- 导出产物可再次 `run`；
+- checkpoint/restore 可恢复运行层状态；
+- 并发冲突场景行为一致且可预期。
 
 ---
 
-## M5 — `clawfarm save`（脱敏扫描 + 导出）
+## M6 — 可观测性（`ps` / `view`）
 
-**目标**：从运行实例导出可分享包。
+**目标**：用户能快速定位实例是否健康、是否卡住。
 
 **交付**
 
-- 命令：`clawfarm save <clawid> --output xxx.clawbox`
-- 导出前扫描 secrets（关键词 + 正则）
-- 默认策略：发现疑似 secret 则阻断导出
-- 产物：
-  - `spec.json`
-  - `user.qcow2`（若可用）
-  - 扫描结果摘要
+- `ps` 展示状态（ready/unhealthy/exited）与最近错误；
+- `view <CLAWID>` 展示实例、挂载、日志、端口与错误摘要；
+- 状态来源统一（实例状态 + `state.json`）。
 
 **验收**
 
-- 有风险时明确失败并给出路径
-- 无风险时导出成功，可再次 `run`
+- 不健康实例在 `ps` 可见且可定位原因；
+- `view` 对存在/不存在实例行为清晰。
 
 ---
 
-## M6 — 存储布局与命名收敛（`.clawfarm`）
+## M7 — 命令与目录收敛到 `clawfarm`
 
-**目标**：目录与环境变量从 `vclaw` 迁移到 `clawfarm`。
+**目标**：从 `vclaw` 过渡到 `clawfarm` 语义。
 
 **交付**
 
-- 默认目录：`~/.clawfarm`
-- 支持：`CLAWFARM_HOME / CLAWFARM_CACHE_DIR / CLAWFARM_DATA_DIR`
-- （可选）兼容读取旧 `VCLAW_*`
+- 主命令切换/别名策略（`clawfarm` first-class）；
+- 默认目录收敛：`~/.clawfarm`；
+- 环境变量命名收敛（`CLAWFARM_*`）。
 
 **验收**
 
-- 新目录布局生效
-- 旧变量兼容策略文档化
+- 新命令链路完整可用；
+- 迁移策略文档化，行为可预测。
 
 ---
 
-## M7 — GUI MVP（第一版）
+## M8 — GUI MVP（后续）
 
-**目标**：实现最小可用 GUI。
+**目标**：GUI-first 的最小可用版本。
 
 **交付**
 
-- 实例列表（状态、健康、端口）
-- 实例详情（日志、错误）
-- Run / Save 操作入口
-- `.env` 可视编辑（密文输入）
+- 实例列表、详情、日志；
+- run/export 入口；
+- `.env` 编辑与密文输入。
 
 **验收**
 
-- GUI 可完成 run → view → save 基本闭环
+- GUI 完成 run → view → export 基本闭环。
 
 ---
 
 ## 3) 横切任务
 
-- 文档：README、命令帮助、FAQ
-- Makefile：新增 `build-clawfarm`、`integration-clawbox-*`
+- 文档：README、命令帮助、FAQ 与 RFC 同步；
 - 测试：
-  - 单元：spec / env / preflight / scan
-  - 集成：new → run → ps → save
-- 兼容策略：`vclaw` 命令别名与迁移提示
+  - 单元：`clawbox` / `mount` / preflight / scan；
+  - 集成：并发 run、异常恢复、export 回归；
+- Makefile：补齐 `test`, `integration`, `build` 目标；
+- 安全：密钥掩码、导出脱敏、错误信息不泄密。
 
 ---
 
-## 4) 协作方式（我们一步一步来）
+## 4) 协作节奏（继续沿用）
 
-每一步都按这个节奏：
-
-1. 你确认本步范围（1 个里程碑或其中一半）
-2. 我实现 + 写测试
-3. 我跑 `go test ./...`
-4. 你验收后我提交 checkpoint commit
+1. 每次只做一个小里程碑（或半个里程碑）；
+2. 实现 + 测试一起提交；
+3. 跑 `go test ./...`；
+4. 你验收后做 checkpoint commit。
 
 ---
 
-## 5) 下一步建议（马上开始）
+## 5) 下一步建议（立即执行）
 
-建议先做 **M1（Clawbox 规格与 I/O）**，因为这是后续 `new/run/save` 的共同基础。
-
-本步我会交付：
-
-- `internal/clawbox/spec.go`
-- `internal/clawbox/spec_test.go`
-- `go test ./...` 全绿
-
-如果你同意，我下一条就直接开始 M1。 
+建议先做 **M2 剩余部分**：把 `internal/mount.Manager` 接入 `run/rm` 实际路径，并补一条并发集成测试（同 `CLAWID` 双 `run` 一成一败）。
