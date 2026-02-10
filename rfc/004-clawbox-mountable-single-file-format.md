@@ -51,8 +51,8 @@
 ## 4. 核心术语
 
 - **Clawbox file:** 单个 `.clawbox` 文件。
-- **CLAWID:** 包内声明的稳定标识符，用于挂载路径与实例来源关联。
-- **Mount root:** `~/.clawfarm/claws/{CLAWID}`。
+- **CLAWID:** (`包内声明的 name`, `文件的 inode 号码的哈希)`组成，用于挂载路径与实例来源关联，原则上一个 clawbox 文件只能打开一次。
+- **Mount root:** `~/.clawfarm/claws/{CLAWID}/mount`。
 - **Runtime overlay:** 实例运行写层（如 `run.qcow2`）。
 
 ---
@@ -72,7 +72,6 @@
 ```json
 {
   "schema_version": 1,
-  "claw_id": "clawbox-demo-20260210",
   "name": "demo-openclaw",
   "created_at_utc": "2026-02-10T00:00:00Z",
   "payload": {
@@ -87,6 +86,13 @@
       "url": "https://...",
       "sha256": "..."
     },
+    "layers": [
+      {
+        "ref": "xfce",
+        "url": "https://...",
+        "sha256": "..."
+      }
+    ],
     "openclaw": {
       "install_root": "/claw",
       "model_primary": "openai/gpt-5",
@@ -98,12 +104,6 @@
 }
 ```
 
-## 5.3 `claw_id` 约束
-
-- 必填，且为包内权威 ID；
-- 推荐正则：`^[a-z0-9][a-z0-9-]{2,63}$`；
-- 同一 `claw_id` 对应不同 payload hash 时，默认拒绝覆盖挂载（需显式迁移命令）。
-
 ---
 
 ## 6. 挂载语义
@@ -112,8 +112,9 @@
 
 运行 `clawfarm run demo.clawbox` 时：
 
-1. 读取 header，拿到 `claw_id`；
-2. 创建挂载点：`~/.clawfarm/claws/{CLAWID}`；
+1. 读取 header，计算得到 `claw_id`；
+2. 创建目录：`~/.clawfarm/claws/{CLAWID}`；
+3. 挂载到目录：`~/.clawfarm/claws/{CLAWID}/mount`；
 3. 挂载 `.clawbox` payload 到该路径（只读）；
 4. 后续运行从该路径读取 `spec` 与 artifacts。
 
@@ -139,17 +140,13 @@
 ```text
 ~/.clawfarm/
   claws/
-    <CLAWID>/            # .clawbox 挂载点（只读）
-  instances/
-    <instance-id>/
-      run.qcow2
-      logs/
-      meta.json
-  env/
-    <CLAWID>.env         # 可选默认 env 存放位置
-  cache/
-    mounts/
-    blobs/
+    <CLAWID>/            # .clawbox 目录
+      mount/             # 挂载点（只读）
+      run.qcow2          # 运行期写层（如 `run.qcow2`）
+      state.json         # 运行状态记录
+      env                # 环境变量文件
+  blobs/
+    <BLOBSHA256>        # blob 文件 (包括基础镜像的内容)
 ```
 
 ---
@@ -170,11 +167,22 @@
 - 当前目录存在唯一 `.clawbox` 文件时可简写；
 - 多个文件则报错并提示明确选择。
 
-## 8.3 `clawfarm save <instance-id> --output xxx.clawbox`
+## 8.3 `clawfarm export <CLAWID> xxx.clawbox`
 
 - 导出为单文件 `.clawbox`；
-- 默认生成新的 `claw_id`（避免与来源冲突）；
-- 可选 `--preserve-clawid`（需要安全提示）。
+- 可选提供一个 `--name`;
+- save 时，需要先 suspend 掉 claw 实例，save 后恢复执行。
+- save 时，应当允许指定 `--squash` 将 run.qcow2 合并到 layers 中的 qcow2 文件，使 layers 只有一层。
+
+## 8.4 `clawfarm checkpoint <CLAWID> --name <name>`
+
+- checkpoint 执行期间，需要先 suspend 掉 claw 实例
+- 记录 run.qcow2 的快照到 blob，记录 checkpoint 到 state.json。
+
+## 8.5 `clawfarm restore <CLAWID> ['1 minute ago'| checkpointName]`
+
+- 备份当前的 run.qcow2 到 checkpoint
+- 恢复对应的 checkpoint 到 run.qcow2
 
 ---
 
@@ -189,17 +197,7 @@
 
 ## 10. 兼容与迁移
 
-## 10.1 与目录版 clawbox 的关系
-
-- 目录版作为过渡格式；
-- 提供转换命令：
-  - `clawfarm pack <dir.clawbox> --output file.clawbox`
-  - `clawfarm unpack file.clawbox --output dir.clawbox`
-
-## 10.2 与旧 `vclaw` 兼容
-
-- 运行核心（VM 启动链路）可复用；
-- 新逻辑主要增加：文件解析、挂载、CLAWID 路径映射、preflight 绑定。
+不需要兼容 vclaw，可以从零实现，只要参考现有 vclaw 的代码仅作为参考即可。
 
 ---
 
@@ -227,6 +225,5 @@
 ## 13. 待决问题
 
 1. v1 payload 文件系统最终选型：`squashfs`（推荐）还是 `erofs`；
-2. macOS 挂载实现：FUSE 依赖策略（内置/可选）；
-3. `claw_id` 冲突策略是否支持自动后缀迁移；
-4. 是否在 v1 引入签名（`ed25519`）强校验。
+2. macOS 挂载实现：FUSE 依赖策略（内置/可选）；(最好内置)
+3. 是否在 v1 引入签名（`ed25519`）强校验。（最好有）

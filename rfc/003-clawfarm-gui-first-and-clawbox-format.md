@@ -89,7 +89,7 @@ clawfarm run demo.clawbox --env .env
 
 - 自动进入 TUI 引导，逐项要求 API key / token；
 - 校验不通过则 **在建 VM 前直接报错**（fail-fast）；
-- 校验通过后生成或更新 `.env`，再启动 VM。
+- 校验通过后生成到  `~/.clawbox/claws/{CLAWID}/env` ，再启动 VM。
 
 也支持简写：
 
@@ -117,7 +117,11 @@ clawfarm run .
 
 ## 6.1 形态
 
-`Clawbox` 作为单文件分发格式（例如 tar/zip 容器），内部是结构化文件系统。
+`Clawbox` 作为单文件分发格式，内部是结构化文件系统。
+
+需要考虑使用怎样的 文件格式，使之易于 mount。
+
+每个 clawbox 文件，在启动后，会 mount 到 ~/.clawfarm/claws/{CLAWID}/mount/
 
 建议结构：
 
