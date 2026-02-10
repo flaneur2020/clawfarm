@@ -414,8 +414,15 @@ func TestRunPromptsForMissingRequiredOpenClawParameters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run should succeed with prompted values: %v", err)
 	}
-	if !strings.Contains(out.String(), "openclaw> OpenClaw primary model") {
-		t.Fatalf("missing model prompt output: %s", out.String())
+	promptOutput := out.String()
+	if !strings.Contains(promptOutput, "openclaw> OpenClaw primary model") {
+		t.Fatalf("missing model prompt output: %s", promptOutput)
+	}
+	if !strings.Contains(promptOutput, "*****************") {
+		t.Fatalf("missing masked secret output: %s", promptOutput)
+	}
+	if strings.Contains(promptOutput, "prompt-openai-key") {
+		t.Fatalf("secret should not be printed in clear text: %s", promptOutput)
 	}
 	if backend.lastSpec.OpenClawEnvironment["OPENAI_API_KEY"] != "prompt-openai-key" {
 		t.Fatalf("missing prompted OPENAI_API_KEY")

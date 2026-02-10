@@ -100,7 +100,7 @@ Complete explicit OpenClaw provider/channel flags:
 
 Precedence for env values is: explicit provider/channel flags > `--openclaw-env` > `--openclaw-env-file`.
 
-`vclaw run` preflight validates required OpenClaw parameters before VM creation. If required values are missing and stdin is interactive, it prompts step-by-step in TUI style; in non-interactive mode it fails fast with actionable errors.
+`vclaw run` preflight validates required OpenClaw parameters before VM creation. If required values are missing and stdin is interactive, it prompts step-by-step in TUI style (secret values are masked with `*`); in non-interactive mode it fails fast with actionable errors.
 
 ## Make targets
 

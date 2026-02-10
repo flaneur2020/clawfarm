@@ -17,6 +17,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/yazhou/krunclaw/internal/config"
 	"github.com/yazhou/krunclaw/internal/images"
 	"github.com/yazhou/krunclaw/internal/state"
@@ -822,6 +824,7 @@ func (a *App) preflightOpenClawInputs(openClawConfig string, openClawEnv map[str
 	}
 
 	canPrompt := a.canPromptForInput()
+	promptFile := a.promptInputFile()
 	var reader *bufio.Reader
 	if canPrompt {
 		reader = bufio.NewReader(a.in)
@@ -829,10 +832,11 @@ func (a *App) preflightOpenClawInputs(openClawConfig string, openClawEnv map[str
 
 	modelPrimary := strings.TrimSpace(requirements.ModelPrimary)
 	if modelPrimary == "" {
-		modelPrimary, err = a.resolveRequiredInput(reader, canPrompt,
+		modelPrimary, err = a.resolveRequiredInput(reader, canPrompt, promptFile,
 			"OpenClaw primary model (provider/model, e.g. openai/gpt-5)",
 			"--openclaw-model-primary",
-			"")
+			"",
+			false)
 		if err != nil {
 			return "", err
 		}
@@ -848,10 +852,11 @@ func (a *App) preflightOpenClawInputs(openClawConfig string, openClawEnv map[str
 	}
 	if providerEnvKey != "" && strings.TrimSpace(openClawEnv[providerEnvKey]) == "" {
 		flagHint := requiredFlagForEnvKey(providerEnvKey)
-		value, resolveErr := a.resolveRequiredInput(reader, canPrompt,
+		value, resolveErr := a.resolveRequiredInput(reader, canPrompt, promptFile,
 			fmt.Sprintf("%s for model %s", providerLabel, modelPrimary),
 			flagHint,
-			providerEnvKey)
+			providerEnvKey,
+			true)
 		if resolveErr != nil {
 			return "", resolveErr
 		}
@@ -862,10 +867,11 @@ func (a *App) preflightOpenClawInputs(openClawConfig string, openClawEnv map[str
 	case "", "none":
 	case "token":
 		if strings.TrimSpace(openClawEnv["OPENCLAW_GATEWAY_TOKEN"]) == "" {
-			value, resolveErr := a.resolveRequiredInput(reader, canPrompt,
+			value, resolveErr := a.resolveRequiredInput(reader, canPrompt, promptFile,
 				"OpenClaw gateway token",
 				"--openclaw-gateway-token",
-				"OPENCLAW_GATEWAY_TOKEN")
+				"OPENCLAW_GATEWAY_TOKEN",
+				true)
 			if resolveErr != nil {
 				return "", resolveErr
 			}
@@ -873,10 +879,11 @@ func (a *App) preflightOpenClawInputs(openClawConfig string, openClawEnv map[str
 		}
 	case "password":
 		if strings.TrimSpace(openClawEnv["OPENCLAW_GATEWAY_PASSWORD"]) == "" {
-			value, resolveErr := a.resolveRequiredInput(reader, canPrompt,
+			value, resolveErr := a.resolveRequiredInput(reader, canPrompt, promptFile,
 				"OpenClaw gateway password",
 				"--openclaw-gateway-password",
-				"OPENCLAW_GATEWAY_PASSWORD")
+				"OPENCLAW_GATEWAY_PASSWORD",
+				true)
 			if resolveErr != nil {
 				return "", resolveErr
 			}
@@ -908,7 +915,7 @@ func (a *App) preflightOpenClawInputs(openClawConfig string, openClawEnv map[str
 			if strings.TrimSpace(openClawEnv[item.envKey]) != "" {
 				continue
 			}
-			value, resolveErr := a.resolveRequiredInput(reader, canPrompt, item.label, item.flagName, item.envKey)
+			value, resolveErr := a.resolveRequiredInput(reader, canPrompt, promptFile, item.label, item.flagName, item.envKey, isSecretOpenClawEnvKey(item.envKey))
 			if resolveErr != nil {
 				return "", resolveErr
 			}
@@ -919,7 +926,7 @@ func (a *App) preflightOpenClawInputs(openClawConfig string, openClawEnv map[str
 	return openClawConfig, nil
 }
 
-func (a *App) resolveRequiredInput(reader *bufio.Reader, canPrompt bool, label string, flagName string, envKey string) (string, error) {
+func (a *App) resolveRequiredInput(reader *bufio.Reader, canPrompt bool, promptFile *os.File, label string, flagName string, envKey string, secret bool) (string, error) {
 	if !canPrompt || reader == nil {
 		if envKey != "" {
 			return "", fmt.Errorf("missing required OpenClaw parameter: %s (set %s or --openclaw-env %s=...)", label, flagName, envKey)
@@ -929,13 +936,13 @@ func (a *App) resolveRequiredInput(reader *bufio.Reader, canPrompt bool, label s
 
 	for attempt := 1; attempt <= 3; attempt++ {
 		fmt.Fprintf(a.out, "openclaw> %s: ", label)
-		line, err := reader.ReadString('\n')
+		value, err := a.readPromptValue(reader, promptFile, secret)
 		if err != nil {
-			return "", fmt.Errorf("read interactive input: %w", err)
+			return "", err
 		}
-		value := strings.TrimSpace(line)
-		if value != "" {
-			return value, nil
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed, nil
 		}
 		fmt.Fprintf(a.errOut, "invalid value: %s cannot be empty\n", label)
 	}
@@ -944,6 +951,63 @@ func (a *App) resolveRequiredInput(reader *bufio.Reader, canPrompt bool, label s
 		return "", fmt.Errorf("missing required OpenClaw parameter after 3 attempts: %s (set %s or --openclaw-env %s=...)", label, flagName, envKey)
 	}
 	return "", fmt.Errorf("missing required OpenClaw parameter after 3 attempts: %s (set %s)", label, flagName)
+}
+
+func (a *App) readPromptValue(reader *bufio.Reader, promptFile *os.File, secret bool) (string, error) {
+	if secret && promptFile != nil {
+		return readMaskedTTYInput(promptFile, a.out)
+	}
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", fmt.Errorf("read interactive input: %w", err)
+	}
+	value := strings.TrimSpace(line)
+	if secret && value != "" {
+		fmt.Fprintln(a.out, strings.Repeat("*", len(value)))
+	}
+	return value, nil
+}
+
+func readMaskedTTYInput(file *os.File, out io.Writer) (string, error) {
+	state, err := term.MakeRaw(int(file.Fd()))
+	if err != nil {
+		return "", fmt.Errorf("prepare masked input: %w", err)
+	}
+	defer term.Restore(int(file.Fd()), state)
+
+	buffer := make([]byte, 0, 64)
+	oneByte := make([]byte, 1)
+	for {
+		count, readErr := file.Read(oneByte)
+		if readErr != nil {
+			return "", fmt.Errorf("read interactive input: %w", readErr)
+		}
+		if count == 0 {
+			continue
+		}
+
+		char := oneByte[0]
+		switch char {
+		case '\r', '\n':
+			fmt.Fprintln(out)
+			return string(buffer), nil
+		case 3:
+			fmt.Fprintln(out)
+			return "", errors.New("input canceled")
+		case 8, 127:
+			if len(buffer) > 0 {
+				buffer = buffer[:len(buffer)-1]
+				fmt.Fprint(out, "\b \b")
+			}
+		default:
+			if char < 32 {
+				continue
+			}
+			buffer = append(buffer, char)
+			fmt.Fprint(out, "*")
+		}
+	}
 }
 
 func (a *App) canPromptForInput() bool {
@@ -960,6 +1024,28 @@ func (a *App) canPromptForInput() bool {
 	return true
 }
 
+func (a *App) promptInputFile() *os.File {
+	if a.in == nil {
+		return nil
+	}
+	file, ok := a.in.(*os.File)
+	if !ok {
+		return nil
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return nil
+	}
+	if info.Mode()&os.ModeCharDevice == 0 {
+		return nil
+	}
+	return file
+}
+
+func isSecretOpenClawEnvKey(envKey string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(envKey))
+	return strings.Contains(upper, "KEY") || strings.Contains(upper, "TOKEN") || strings.Contains(upper, "PASSWORD") || strings.Contains(upper, "SECRET")
+}
 func parseOpenClawRuntimeRequirements(configPayload string) (openClawRuntimeRequirements, error) {
 	requirements := openClawRuntimeRequirements{}
 	if strings.TrimSpace(configPayload) == "" {
