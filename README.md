@@ -4,19 +4,36 @@ Run full OpenClaw inside a lightweight VM.
 
 `vclaw` currently uses a QEMU-based backend for real VM bring-up and lifecycle, while the RFC target backend remains `Code-Hex/vz`.
 
-## Current status (RFC-001 progress)
+## Current status
 
 This repository now includes:
 
-- Go-based `vclaw` CLI: `run`, `image`, `ps`, `suspend`, `resume`, `rm`
+- Go-based CLI commands: `run`, `image`, `ps`, `suspend`, `resume`, `rm`, `export`, `checkpoint`, `restore`
 - Ubuntu image reference parsing (`ubuntu:24.04`, `ubuntu:24.04@YYYYMMDD`)
-- Single-file image caching under `~/.vclaw/images` (override with `VCLAW_HOME`/`VCLAW_CACHE_DIR`)
-- Real VM run path via QEMU:
-  - cloud-init seed generation
-  - workspace/state host mounts
-  - OpenClaw bootstrap in guest
-  - host loopback port forwarding for gateway and `--publish`
-- Instance metadata + process lifecycle under `~/.vclaw/instances` (override with `VCLAW_HOME`/`VCLAW_DATA_DIR`)
+- Image cache + per-instance disk copy (`~/.vclaw/images`, `~/.vclaw/instances`)
+- Lock-protected instance lifecycle (`instance.flock`) for `run/rm`
+- OpenClaw preflight before VM creation:
+  - validates required runtime parameters
+  - interactive prompt when stdin is TTY
+  - secret input masked with `*`
+- `ps` health reconciliation (`ready`, `unhealthy`, `exited`) with `LAST_ERROR`
+
+### Clawbox run modes
+
+`vclaw run` now supports two `.clawbox` input modes:
+
+1. **Header JSON clawbox**
+   - `run <file.clawbox>` and `run .` (if current dir has exactly one `.clawbox`)
+   - computes deterministic `CLAWID`
+   - applies clawbox OpenClaw defaults (`model_primary`, `gateway_auth_mode`, `required_env`)
+
+2. **Spec JSON clawbox (early simplified mode)**
+   - if file starts with `{`, it is treated as JSON spec mode
+   - does **not** mount clawbox payload
+   - downloads `base_image` and `layers`
+   - verifies SHA256
+   - reuses cached artifacts (no redownload if already cached)
+   - runs declared `provision` commands before VM start
 
 ## Build
 
@@ -31,18 +48,22 @@ make build
 ```bash
 vclaw image ls
 vclaw image fetch ubuntu:24.04
+
 vclaw run ubuntu:24.04 --workspace=. --publish 8080:80
+vclaw run demo.clawbox --workspace=. --no-wait
+vclaw run . --workspace=. --no-wait
+
 vclaw ps
 vclaw suspend <CLAWID>
 vclaw resume <CLAWID>
 vclaw rm <CLAWID>
 ```
 
-The `image ls` table lists supported images and marks whether each image is already downloaded (`yes`/`no`).
+`image ls` shows available images and whether each image is already downloaded (`yes`/`no`).
 
-`vclaw ps` includes `STATUS` and `LAST_ERROR`; when the VM is running but OpenClaw gateway is unreachable or returns HTTP 5xx, status is shown as `unhealthy`.
+## OpenClaw run flags
 
-Useful `run` flags:
+Useful run flags:
 
 ```bash
 vclaw run ubuntu:24.04 \
@@ -74,7 +95,7 @@ vclaw run ubuntu:24.04 \
   --openclaw-env-file ./.env.openclaw
 ```
 
-Complete explicit OpenClaw provider/channel flags:
+Complete explicit provider/channel flags:
 
 ```bash
 # AI provider keys
@@ -98,49 +119,37 @@ Complete explicit OpenClaw provider/channel flags:
 --openclaw-whatsapp-app-secret
 ```
 
-Precedence for env values is: explicit provider/channel flags > `--openclaw-env` > `--openclaw-env-file`.
+Env precedence is:
 
-`vclaw run` preflight validates required OpenClaw parameters before VM creation. If required values are missing and stdin is interactive, it prompts step-by-step in TUI style (secret values are masked with `*`); in non-interactive mode it fails fast with actionable errors.
+1. explicit provider/channel flags
+2. `--openclaw-env`
+3. `--openclaw-env-file`
 
 ## Make targets
 
 ```bash
 make help
+make build
 make test
+make integration
 make integration-001
 make integration-001-run
 make integration-002
 make clean
 ```
 
-Use `INTEGRATION_IMAGE_REF` to override the integration image, for example:
+Use `INTEGRATION_IMAGE_REF` to override integration image ref:
 
 ```bash
 make integration-002 INTEGRATION_IMAGE_REF=ubuntu:24.04@20250115
 ```
 
-## Integration smoke script
+## Cache and download notes
 
-```bash
-make integration-001
-```
-
-To execute full VM run + readiness probe:
-
-```bash
-make integration-001-run
-```
-
-To verify image cache reuse and per-instance image copy:
-
-```bash
-make integration-002
-```
-
-## Notes on image download/cache
-
-`vclaw image fetch` downloads one image file per ref (for example `image.img`; underlying format may be raw or qcow2).
-
-- If the image is already present in `~/.vclaw/images/<ref>/`, `vclaw image fetch` reuses cache and does not download again.
-- `vclaw image fetch` shows a dynamic progress bar while downloading.
-- Each `vclaw run` copies the cached image to `~/.vclaw/instances/<CLAWID>/instance.img` before VM start.
+- `vclaw image fetch` downloads one runtime image file per ref and shows a dynamic progress bar.
+- If an image is already present in cache, fetch reuses cache and does not redownload.
+- Each `vclaw run` copies the source image into instance-local disk:
+  - `~/.vclaw/instances/<CLAWID>/instance.img`
+- Spec JSON clawbox artifacts are cached under:
+  - `~/.vclaw/images/clawbox/`
+- Cached spec artifacts are checksum-verified; invalid cache is deleted and re-downloaded.

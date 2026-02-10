@@ -1,190 +1,102 @@
-# ROADMAP — Clawfarm / Clawbox（RFC-004 / RFC-005 对齐版）
+# ROADMAP — Clawbox MVP Runtime First（以 RFC-004 / RFC-005 为准）
 
-## 0) 基线与目标
+## 0) 约束基线
 
-本 roadmap 以以下 RFC 为准：
+以以下 RFC 为最高优先级：
 
 - `rfc/004-clawbox-mountable-single-file-format.md`
 - `rfc/005-clawbox-mount-lifecycle-and-locking.md`
 
-核心架构约束（已定版）：
+当前已确认的核心约束：
 
 1. `clawbox` 是单文件分发格式；
-2. 运行时挂载到 `~/.clawfarm/claws/{CLAWID}/mount`（只读）；
-3. `CLAWID` 来自 `name + inode hash`；
-4. 并发互斥仅使用单一锁文件：`instance.flock`（`github.com/gofrs/flock`）；
-5. `state.json` 仅用于状态展示，不参与占用判定；
-6. 导出命令统一为 `export`（不再使用 `save` 命名）。
+2. 运行时挂载目标统一为：`.../{CLAWID}/mount`；
+3. `CLAWID` 基于 `name + inode hash` 计算；
+4. 并发互斥使用单一 `instance.flock`；
+5. `state.json` 仅用于展示，不作为占用判定；
+6. 命令名统一使用 `export`（不再混用 `save`）。
 
 ---
 
-## 1) 当前进度快照（2026-02-10）
+## 1) 优先级分层（按你最新要求）
 
-- ✅ **M1 已完成**：`internal/clawbox` 规格解析/校验（含 `CLAWID` 计算）
-  - `internal/clawbox/spec.go`
-  - `internal/clawbox/spec_test.go`
-- ✅ **M2 已完成**：`internal/mount` 单锁模型已接入 `run/rm` 关键路径（含并发测试）
-  - `internal/mount/manager.go`
-  - `internal/mount/flock_locker.go`
-  - `internal/mount/manager_test.go`
-  - `internal/app/app.go`
-  - `internal/app/app_test.go`
-- ✅ **M3 已完成**：支持 `run <file.clawbox>` 与 `run .`（唯一文件自动发现）
-- ✅ Go 版本基线已升级到 `go 1.24.x`
-- 🟡 **M5 进行中**：`export/checkpoint/restore` 锁保护已落地，`export` 已支持默认脱敏扫描（可 `--allow-secrets` 旁路），下一步补齐真实 `.clawbox` 打包
+## P0（必须先完成）
 
----
+目标：**最小可用生产路径**，能稳定“拉起 OpenClaw VM + 基于 clawbox 运行”。
 
-## 2) 里程碑拆分（更新版）
+- `run <file.clawbox>`：支持 header-json clawbox；
+- `run .`：当前目录唯一 `.clawbox` 自动发现；
+- `run` 前置参数校验（含 OpenClaw 必填参数）；
+- 缺参交互式输入（TUI 风格，密钥掩码 `*`）；
+- `ps` 可见不健康实例（`unhealthy` + `last_error`）；
+- 锁保护下的 `run/rm` 并发安全。
 
-## M2 — Mount lifecycle 接入 CLI（已完成）
+## P1（紧随其后）
 
-**目标**：把 RFC-005 的单锁模型接入现有命令路径。
+目标：补齐 **clawbox 格式运行路径**，但继续保持实现简单。
 
-**交付**
+- `.clawbox` 纯文本 JSON spec 模式（首字符 `{`）：
+  - 不走 mount；
+  - 直接下载 `base_image` / `layers`；
+  - 做 SHA256 校验；
+  - 执行 `provision`；
+  - 复用本地缓存，已下载文件不重复下载。
+- 与 mountable clawbox 路径并存，作为早期快速迭代通道；
+- 持续补强集成测试覆盖（缓存复用、失败回滚、并发）。
 
-- `run` 进入关键区前 `TryLock(instance.flock)`；
-- `run` 在锁内完成挂载复用/冲突检查与 `state.json` 更新；
-- `rm`（以及后续 stop 路径）在锁内释放挂载并更新状态；
-- busy / mount conflict 以明确错误返回。
+## P2（降优先级）
 
-**验收**
-
-- 并发 `run` 同一 `CLAWID`：一个成功，一个 `ErrBusy`；
-- `state.json.active=true` 但锁可获取时，不会阻塞新 `run`；
-- `go test ./...` 全绿。
+- `export` 深化（脱敏策略、打包完善）；
+- `checkpoint/restore` 能力完善；
+- `rm`/回收策略增强；
+- CLI 命名迁移到 `clawfarm` 与目录迁移到 `~/.clawfarm`；
+- GUI first-class 与可视化运维能力。
 
 ---
 
-## M3 — `run <file.clawbox>` 端到端（已完成）
+## 2) 当前进度快照（2026-02-10）
 
-**目标**：从 `.clawbox` 文件直接启动。
+## ✅ 已完成
 
-**交付**
+- `internal/clawbox`：spec 解析/校验 + `CLAWID` 计算；
+- `internal/mount`：基于 `instance.flock` 的单锁模型落地；
+- `run/rm`：锁保护 + 并发冲突处理；
+- `run <file.clawbox>` 与 `run .`；
+- OpenClaw 参数预检：
+  - 支持 `required_env`；
+  - 缺参时交互式输入；
+  - 非交互模式 fail-fast；
+- `ps` 健康态展示（`ready/unhealthy/exited` + `last_error`）；
+- **JSON-spec `.clawbox` 运行路径（P1 核心）**：
+  - 检测规则：文件首个非空白字符为 `{`；
+  - 下载 base/layer 到 `~/.vclaw/images/clawbox`（或 `VCLAW_CACHE_DIR`）；
+  - SHA256 校验；
+  - 缓存命中时不重复下载；
+  - 执行 `provision` 命令；
+  - 该模式下不设置 mount source。
 
-- `run demo.clawbox --env .env`；
-- `run .`（当前目录唯一 `.clawbox` 自动发现）；
-- 读取 header → 校验 → 计算 `CLAWID`；
-- 挂载路径固定：`~/.clawfarm/claws/{CLAWID}/mount`；
-- 复用现有 VM 启动链路。
+## ✅ 测试状态
 
-**验收**
-
-- 给定合法 `.clawbox` 可启动；
-- 多个 `.clawbox` 场景提示用户显式选择；
-- `go test ./...` + 关键集成测试通过。
-
----
-
-## M4 — OpenClaw preflight + TUI 引导
-
-**目标**：启动前完成必填参数校验，失败要 fail-fast。
-
-**交付**
-
-- 从 `spec.openclaw.required_env` 读取必填项；
-- 缺失时交互式 TUI 逐项输入（密钥掩码 `*`）；
-- 非交互模式缺参直接失败；
-- 合法性检查在建 VM 前完成。
-
-**验收**
-
-- 缺参时 VM 不会启动；
-- 参数齐全时实例可启动并在 `ps` 中可见；
-- 异常实例在 `ps` 可见且状态明确。
+- `go test ./...` 全绿；
+- 已有 JSON-spec 集成测试覆盖：
+  - 首次下载并运行；
+  - 二次运行缓存复用（无重复下载）；
+  - SHA 不匹配时启动前失败。
 
 ---
 
-## M5 — `export` / `checkpoint` / `restore`（进行中）
+## 3) 下一阶段建议（P0/P1 only）
 
-**目标**：实现可导出、可回滚的运行闭环。
-
-**交付**
-
-- `export <CLAWID> <output.clawbox>`；
-- `checkpoint <CLAWID> --name <name>`；
-- `restore <CLAWID> <checkpoint>`；
-- 三者均在锁保护下执行；
-- `export` 支持脱敏扫描（默认阻断，可 `--allow-secrets` 旁路），后续可扩展 `--squash`。
-
-**验收**
-
-- 导出产物可再次 `run`；
-- checkpoint/restore 可恢复运行层状态；
-- 并发冲突场景行为一致且可预期。
+1. 补齐“mountable clawbox 单文件”真实挂载链路（与 RFC-004 对齐）；
+2. 统一 spec-json 与 mount 模式的 provision 执行语义；
+3. 增加失败清理一致性（下载中断、provision 失败、启动失败）；
+4. 增加端到端 smoke：`run -> ps -> rm`（两种 clawbox 模式都覆盖）。
 
 ---
 
-## M6 — 可观测性（`ps` / `view`）
+## 4) 协作节奏
 
-**目标**：用户能快速定位实例是否健康、是否卡住。
-
-**交付**
-
-- `ps` 展示状态（ready/unhealthy/exited）与最近错误；
-- `view <CLAWID>` 展示实例、挂载、日志、端口与错误摘要；
-- 状态来源统一（实例状态 + `state.json`）。
-
-**验收**
-
-- 不健康实例在 `ps` 可见且可定位原因；
-- `view` 对存在/不存在实例行为清晰。
-
----
-
-## M7 — 命令与目录收敛到 `clawfarm`
-
-**目标**：从 `vclaw` 过渡到 `clawfarm` 语义。
-
-**交付**
-
-- 主命令切换/别名策略（`clawfarm` first-class）；
-- 默认目录收敛：`~/.clawfarm`；
-- 环境变量命名收敛（`CLAWFARM_*`）。
-
-**验收**
-
-- 新命令链路完整可用；
-- 迁移策略文档化，行为可预测。
-
----
-
-## M8 — GUI MVP（后续）
-
-**目标**：GUI-first 的最小可用版本。
-
-**交付**
-
-- 实例列表、详情、日志；
-- run/export 入口；
-- `.env` 编辑与密文输入。
-
-**验收**
-
-- GUI 完成 run → view → export 基本闭环。
-
----
-
-## 3) 横切任务
-
-- 文档：README、命令帮助、FAQ 与 RFC 同步；
-- 测试：
-  - 单元：`clawbox` / `mount` / preflight / scan；
-  - 集成：并发 run、异常恢复、export 回归；
-- Makefile：补齐 `test`, `integration`, `build` 目标；
-- 安全：密钥掩码、导出脱敏、错误信息不泄密。
-
----
-
-## 4) 协作节奏（继续沿用）
-
-1. 每次只做一个小里程碑（或半个里程碑）；
-2. 实现 + 测试一起提交；
-3. 跑 `go test ./...`；
-4. 你验收后做 checkpoint commit。
-
----
-
-## 5) 下一步建议（立即执行）
-
-建议开始 **M5 第一段**：先落地 `export` 命令的最小实现（锁保护 + 基础导出路径 + 回归测试），再扩展到 `checkpoint/restore`。
+- 每次只推进一个可验收小切片；
+- 代码 + 测试一起提交；
+- 每个 checkpoint 都保持 `go test ./...` 通过；
+- 若 RFC 与实现冲突，以 RFC-004/005 为准。
