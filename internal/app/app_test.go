@@ -557,12 +557,12 @@ func TestRunDotFailsWhenMultipleClawboxFilesExist(t *testing.T) {
 }
 
 func TestRunJSONSpecClawboxDownloadsAndRunsWithoutMount(t *testing.T) {
-	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
-		t.Fatalf("set cache env: %v", err)
+	home := t.TempDir()
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatalf("set HOME env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	defer os.Unsetenv("HOME")
 	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
@@ -643,23 +643,23 @@ func TestRunJSONSpecClawboxDownloadsAndRunsWithoutMount(t *testing.T) {
 		t.Fatalf("json spec run should not set mount source, got %q", mountState.SourcePath)
 	}
 
-	imageCacheDir := filepath.Join(cache, "images", "clawbox")
-	entries, err := os.ReadDir(imageCacheDir)
-	if err != nil {
-		t.Fatalf("read spec image cache dir: %v", err)
+	baseBlobPath := filepath.Join(home, ".clawfarm", "blobs", baseSHA)
+	if _, err := os.Stat(baseBlobPath); err != nil {
+		t.Fatalf("expected base blob file %s: %v", baseBlobPath, err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("expected 2 cached artifacts (base+layer), got %d", len(entries))
+	layerBlobPath := filepath.Join(home, ".clawfarm", "blobs", layerSHA)
+	if _, err := os.Stat(layerBlobPath); err != nil {
+		t.Fatalf("expected layer blob file %s: %v", layerBlobPath, err)
 	}
 }
 
 func TestRunJSONSpecClawboxUsesCachedArtifactsWithoutRedownload(t *testing.T) {
-	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
-		t.Fatalf("set cache env: %v", err)
+	home := t.TempDir()
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatalf("set HOME env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	defer os.Unsetenv("HOME")
 	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
@@ -732,12 +732,12 @@ func TestRunJSONSpecClawboxUsesCachedArtifactsWithoutRedownload(t *testing.T) {
 }
 
 func TestRunJSONSpecClawboxFailsOnSHA256Mismatch(t *testing.T) {
-	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
-		t.Fatalf("set cache env: %v", err)
+	home := t.TempDir()
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatalf("set HOME env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	defer os.Unsetenv("HOME")
 	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}

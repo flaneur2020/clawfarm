@@ -69,7 +69,8 @@
 - `ps` 健康态展示（`ready/unhealthy/exited` + `last_error`）；
 - **JSON-spec `.clawbox` 运行路径（P1 核心）**：
   - 检测规则：文件首个非空白字符为 `{`；
-  - 下载 base/layer 到 `~/.vclaw/images/clawbox`（或 `VCLAW_CACHE_DIR`）；
+  - 下载 base/layer 到 `~/.clawfarm/blobs/<sha256>`；
+  - 采用临时文件下载完成后 rename 到 `<sha256>`；
   - SHA256 校验；
   - 缓存命中时不重复下载；
   - 执行 `provision` 命令；

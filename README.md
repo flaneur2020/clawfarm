@@ -151,5 +151,9 @@ make integration-002 INTEGRATION_IMAGE_REF=ubuntu:24.04@20250115
 - Each `vclaw run` copies the source image into instance-local disk:
   - `~/.vclaw/instances/<CLAWID>/instance.img`
 - Spec JSON clawbox artifacts are cached under:
-  - `~/.vclaw/images/clawbox/`
+  - `~/.clawfarm/blobs/<sha256>`
+- Spec artifact download flow is:
+  - download to a temporary file
+  - verify SHA256
+  - rename atomically to `<sha256>`
 - Cached spec artifacts are checksum-verified; invalid cache is deleted and re-downloaded.

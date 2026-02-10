@@ -412,12 +412,11 @@ func (a *App) prepareRunTarget(ctx context.Context, manager *images.Manager, tar
 		}, nil
 	}
 
-	cacheRoot, err := config.CacheDir()
+	blobsRoot, err := clawfarmBlobsRoot()
 	if err != nil {
 		return preparedRunTarget{}, err
 	}
-	specImageRoot := filepath.Join(cacheRoot, "images", "clawbox")
-	if err := ensureDir(specImageRoot); err != nil {
+	if err := ensureDir(blobsRoot); err != nil {
 		return preparedRunTarget{}, err
 	}
 
@@ -426,14 +425,14 @@ func (a *App) prepareRunTarget(ctx context.Context, manager *images.Manager, tar
 		URL:    strings.TrimSpace(target.SpecBaseImageURL),
 		SHA256: strings.TrimSpace(target.SpecBaseImageSHA256),
 	}
-	basePath, err := ensureSpecArtifact(ctx, specImageRoot, baseArtifact, a.out)
+	basePath, err := ensureSpecArtifact(ctx, blobsRoot, baseArtifact, a.out)
 	if err != nil {
 		return preparedRunTarget{}, err
 	}
 
 	layerPaths := make([]string, 0, len(target.SpecLayerArtifacts))
 	for _, layer := range target.SpecLayerArtifacts {
-		layerPath, layerErr := ensureSpecArtifact(ctx, specImageRoot, layer, a.out)
+		layerPath, layerErr := ensureSpecArtifact(ctx, blobsRoot, layer, a.out)
 		if layerErr != nil {
 			return preparedRunTarget{}, layerErr
 		}
@@ -478,7 +477,9 @@ func ensureSpecArtifact(ctx context.Context, root string, artifact runArtifact, 
 		return "", fmt.Errorf("invalid %s.sha256 %q: expected lowercase 64-char hex", label, artifact.SHA256)
 	}
 
-	artifactPath := filepath.Join(root, specArtifactFileName(label, rawURL, expectedSHA))
+	artifactPath := filepath.Join(root, expectedSHA)
+	tempPath := artifactPath + ".tmp.download"
+	_ = os.Remove(tempPath)
 	if fileExistsAndNonEmpty(artifactPath) {
 		if err := verifyFileSHA256(artifactPath, expectedSHA); err == nil {
 			if out != nil {
@@ -489,37 +490,19 @@ func ensureSpecArtifact(ctx context.Context, root string, artifact runArtifact, 
 		_ = os.Remove(artifactPath)
 	}
 
-	if err := downloadFileWithProgress(ctx, rawURL, artifactPath, out, label); err != nil {
+	if err := downloadFileWithProgress(ctx, rawURL, tempPath, out, label); err != nil {
 		return "", fmt.Errorf("download %s: %w", label, err)
 	}
-	if err := verifyFileSHA256(artifactPath, expectedSHA); err != nil {
-		_ = os.Remove(artifactPath)
+	if err := verifyFileSHA256(tempPath, expectedSHA); err != nil {
+		_ = os.Remove(tempPath)
+		return "", err
+	}
+	if err := os.Rename(tempPath, artifactPath); err != nil {
+		_ = os.Remove(tempPath)
 		return "", err
 	}
 
 	return artifactPath, nil
-}
-
-func specArtifactFileName(label string, rawURL string, sha string) string {
-	safeLabel := strings.ToLower(strings.TrimSpace(label))
-	safeLabel = regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(safeLabel, "-")
-	safeLabel = strings.Trim(safeLabel, "-")
-	if safeLabel == "" {
-		safeLabel = "artifact"
-	}
-
-	ext := ".img"
-	if parsedURL, err := url.Parse(rawURL); err == nil {
-		if candidate := strings.ToLower(strings.TrimSpace(filepath.Ext(parsedURL.Path))); candidate != "" {
-			ext = candidate
-		}
-	}
-
-	if len(sha) > 16 {
-		sha = sha[:16]
-	}
-
-	return fmt.Sprintf("%s-%s%s", safeLabel, sha, ext)
 }
 
 func downloadFileWithProgress(ctx context.Context, rawURL string, destination string, out io.Writer, label string) error {
@@ -538,19 +521,18 @@ func downloadFileWithProgress(ctx context.Context, rawURL string, destination st
 		return fmt.Errorf("request failed with status %s", response.Status)
 	}
 
-	tempPath := destination + ".tmp"
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return err
 	}
 
-	file, err := os.Create(tempPath)
+	file, err := os.Create(destination)
 	if err != nil {
 		return err
 	}
 
 	cleanup := func() {
 		file.Close()
-		_ = os.Remove(tempPath)
+		_ = os.Remove(destination)
 	}
 
 	if out == nil {
@@ -600,16 +582,19 @@ func downloadFileWithProgress(ctx context.Context, rawURL string, destination st
 	}
 
 	if err := file.Close(); err != nil {
-		_ = os.Remove(tempPath)
-		return err
-	}
-
-	if err := os.Rename(tempPath, destination); err != nil {
-		_ = os.Remove(tempPath)
+		_ = os.Remove(destination)
 		return err
 	}
 
 	return nil
+}
+
+func clawfarmBlobsRoot() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".clawfarm", "blobs"), nil
 }
 
 func renderDownloadProgress(out io.Writer, label string, downloaded int64, total int64) {
