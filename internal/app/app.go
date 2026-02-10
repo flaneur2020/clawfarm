@@ -811,23 +811,31 @@ func (a *App) runRemove(args []string) error {
 
 func (a *App) runExport(args []string) error {
 	allowSecrets := false
+	exportName := ""
 	positionals := make([]string, 0, len(args))
-	for _, arg := range args {
-		trimmed := strings.TrimSpace(arg)
-		switch trimmed {
-		case "--allow-secrets":
+	for index := 0; index < len(args); index++ {
+		trimmed := strings.TrimSpace(args[index])
+		switch {
+		case trimmed == "":
+			continue
+		case trimmed == "--allow-secrets":
 			allowSecrets = true
-			continue
-		case "":
-			continue
-		}
-		if strings.HasPrefix(trimmed, "--") {
+		case trimmed == "--name":
+			if index+1 >= len(args) {
+				return errors.New("missing value for --name")
+			}
+			index++
+			exportName = strings.TrimSpace(args[index])
+		case strings.HasPrefix(trimmed, "--name="):
+			exportName = strings.TrimSpace(strings.TrimPrefix(trimmed, "--name="))
+		case strings.HasPrefix(trimmed, "--"):
 			return fmt.Errorf("unknown export flag %q", trimmed)
+		default:
+			positionals = append(positionals, trimmed)
 		}
-		positionals = append(positionals, trimmed)
 	}
 	if len(positionals) != 2 {
-		return errors.New("usage: vclaw export <clawid> <output.clawbox> [--allow-secrets]")
+		return errors.New("usage: vclaw export <clawid> <output.clawbox> [--allow-secrets] [--name <name>]")
 	}
 	id := positionals[0]
 	outputPath := positionals[1]
@@ -890,7 +898,20 @@ func (a *App) runExport(args []string) error {
 			fmt.Fprintf(a.errOut, "warning: exporting with possible secrets due to --allow-secrets (%s)\n", strings.Join(findings, ", "))
 		}
 
-		return copyFile(absSourcePath, absOutputPath)
+		if strings.TrimSpace(exportName) == "" {
+			return copyFile(absSourcePath, absOutputPath)
+		}
+		if _, computeErr := clawbox.ComputeClawID(absSourcePath, exportName); computeErr != nil {
+			return fmt.Errorf("invalid --name %q: %w", exportName, computeErr)
+		}
+
+		header, loadErr := clawbox.LoadHeaderJSON(absSourcePath)
+		if loadErr != nil {
+			return fmt.Errorf("load source clawbox for --name: %w", loadErr)
+		}
+		header.Name = exportName
+		header.CreatedAtUTC = time.Now().UTC()
+		return clawbox.SaveHeaderJSON(absOutputPath, header)
 	})
 	if err != nil {
 		return err
@@ -1157,7 +1178,7 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.out, "  vclaw suspend <clawid>")
 	fmt.Fprintln(a.out, "  vclaw resume <clawid>")
 	fmt.Fprintln(a.out, "  vclaw rm <clawid>")
-	fmt.Fprintln(a.out, "  vclaw export <clawid> <output.clawbox> [--allow-secrets]")
+	fmt.Fprintln(a.out, "  vclaw export <clawid> <output.clawbox> [--allow-secrets] [--name <name>]")
 	fmt.Fprintln(a.out, "  vclaw checkpoint <clawid> --name <name>")
 	fmt.Fprintln(a.out, "  vclaw restore <clawid> <checkpoint>")
 	fmt.Fprintln(a.out, "")

@@ -533,6 +533,90 @@ func TestExportCopiesClawboxSource(t *testing.T) {
 	}
 }
 
+func TestExportWithNameOverridesHeaderName(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+	workspace := t.TempDir()
+	clawboxPath := writeTestClawboxFile(t, workspace, "demo-openclaw.clawbox", "demo-openclaw", "ubuntu:24.04")
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--openclaw-openai-api-key", "test-key", "--openclaw-gateway-token", "test-gateway-token"}); err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+	id := parseClawIDFromRunOutput(out.String())
+	if id == "" {
+		t.Fatalf("failed to parse CLAWID from run output: %s", out.String())
+	}
+
+	exportPath := filepath.Join(t.TempDir(), "renamed.clawbox")
+	if err := application.Run([]string{"export", id, exportPath, "--name", "renamed-openclaw"}); err != nil {
+		t.Fatalf("export with --name failed: %v", err)
+	}
+
+	header, err := clawbox.LoadHeaderJSON(exportPath)
+	if err != nil {
+		t.Fatalf("load exported clawbox header: %v", err)
+	}
+	if header.Name != "renamed-openclaw" {
+		t.Fatalf("expected renamed header name, got %q", header.Name)
+	}
+	if header.Spec.BaseImage.Ref != "ubuntu:24.04" {
+		t.Fatalf("unexpected base image ref in exported clawbox: %s", header.Spec.BaseImage.Ref)
+	}
+}
+
+func TestExportWithInvalidNameFails(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+	workspace := t.TempDir()
+	clawboxPath := writeTestClawboxFile(t, workspace, "demo-openclaw.clawbox", "demo-openclaw", "ubuntu:24.04")
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--openclaw-openai-api-key", "test-key", "--openclaw-gateway-token", "test-gateway-token"}); err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+	id := parseClawIDFromRunOutput(out.String())
+	if id == "" {
+		t.Fatalf("failed to parse CLAWID from run output: %s", out.String())
+	}
+
+	err := application.Run([]string{"export", id, filepath.Join(t.TempDir(), "invalid-name.clawbox"), "--name", "INVALID_NAME"})
+	if err == nil {
+		t.Fatal("expected export to fail for invalid --name")
+	}
+	if !strings.Contains(err.Error(), "invalid --name") {
+		t.Fatalf("unexpected error for invalid --name: %v", err)
+	}
+}
+
 func TestExportBlocksPossibleSecretsByDefault(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
