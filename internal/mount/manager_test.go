@@ -96,6 +96,25 @@ func TestAcquireDetectsMountConflict(t *testing.T) {
 	}
 }
 
+func TestAcquireReusesMountedSourceWithoutRemount(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "demo.clawbox")
+	manager := NewManager(root, &fakeLocker{ok: true}, &fakeMounter{isMounted: true})
+
+	if err := writeState(filepath.Join(root, "demo-123", stateFileName), State{SourcePath: source}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	if err := manager.Acquire(context.Background(), AcquireRequest{ClawID: "demo-123", SourcePath: source}); err != nil {
+		t.Fatalf("Acquire failed: %v", err)
+	}
+
+	mounter := manager.mounter.(*fakeMounter)
+	if mounter.mountCalls != 0 {
+		t.Fatalf("expected no remount when already mounted with same source, got %d", mounter.mountCalls)
+	}
+}
+
 func TestRecoverResetsStateAndUnmounts(t *testing.T) {
 	root := t.TempDir()
 	mounter := &fakeMounter{isMounted: true}

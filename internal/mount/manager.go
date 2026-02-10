@@ -110,11 +110,14 @@ func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) error {
 			if err != nil {
 				return err
 			}
-			if mounted && state.SourcePath != "" && state.SourcePath != req.SourcePath {
-				return ErrMountConflict
-			}
-			if err := m.mounter.MountReadOnly(ctx, req.SourcePath, mountPath); err != nil {
-				return err
+			if mounted {
+				if state.SourcePath != "" && state.SourcePath != req.SourcePath {
+					return ErrMountConflict
+				}
+			} else {
+				if err := m.mounter.MountReadOnly(ctx, req.SourcePath, mountPath); err != nil {
+					return err
+				}
 			}
 			state.SourcePath = req.SourcePath
 		}

@@ -21,6 +21,7 @@ import (
 
 	"github.com/yazhou/krunclaw/internal/config"
 	"github.com/yazhou/krunclaw/internal/images"
+	"github.com/yazhou/krunclaw/internal/mount"
 	"github.com/yazhou/krunclaw/internal/state"
 	"github.com/yazhou/krunclaw/internal/vm"
 )
@@ -302,6 +303,10 @@ func (a *App) runRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	mountManager, err := a.mountManager()
+	if err != nil {
+		return err
+	}
 
 	id, err := newClawID()
 	if err != nil {
@@ -314,6 +319,13 @@ func (a *App) runRun(args []string) error {
 	}
 	instanceImagePath := filepath.Join(instanceDir, "instance.img")
 	if err := copyFile(imageMeta.RuntimeDisk, instanceImagePath); err != nil {
+		return err
+	}
+	if err := mountManager.Acquire(context.Background(), mount.AcquireRequest{
+		ClawID:     id,
+		SourcePath: imageMeta.RuntimeDisk,
+		InstanceID: id,
+	}); err != nil {
 		return err
 	}
 
@@ -339,6 +351,18 @@ func (a *App) runRun(args []string) error {
 		OpenClawEnvironment: openClawEnv,
 	})
 	if err != nil {
+		_ = mountManager.Release(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: true})
+		return err
+	}
+	if err := mountManager.Acquire(context.Background(), mount.AcquireRequest{
+		ClawID:     id,
+		InstanceID: id,
+		PID:        startResult.PID,
+	}); err != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		defer cancel()
+		_ = a.backend.Stop(stopCtx, startResult.PID)
+		_ = mountManager.Release(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: true})
 		return err
 	}
 
@@ -585,6 +609,10 @@ func (a *App) runRemove(args []string) error {
 	if err != nil {
 		return err
 	}
+	mountManager, err := a.mountManager()
+	if err != nil {
+		return err
+	}
 
 	instance, err := store.Load(args[0])
 	if err != nil {
@@ -600,6 +628,9 @@ func (a *App) runRemove(args []string) error {
 		if err := a.backend.Stop(stopCtx, instance.PID); err != nil {
 			return err
 		}
+	}
+	if err := mountManager.Release(context.Background(), mount.ReleaseRequest{ClawID: instance.ID, Unmount: true}); err != nil {
+		return err
 	}
 
 	if err := store.Delete(args[0]); err != nil {
@@ -633,6 +664,18 @@ func (a *App) instanceStore() (*state.Store, string, error) {
 		return nil, "", err
 	}
 	return state.NewStore(instancesRoot), instancesRoot, nil
+}
+
+func (a *App) mountManager() (*mount.Manager, error) {
+	dataDir, err := config.DataDir()
+	if err != nil {
+		return nil, err
+	}
+	clawsRoot := filepath.Join(dataDir, "claws")
+	if err := ensureDir(clawsRoot); err != nil {
+		return nil, err
+	}
+	return mount.NewManager(clawsRoot, nil, nil), nil
 }
 
 func ensureDir(path string) error {

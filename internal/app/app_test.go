@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"os"
@@ -156,6 +157,63 @@ func TestRunFlowAndInstanceLifecycle(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "removed") {
 		t.Fatalf("rm output missing removed marker: %s", out.String())
+	}
+}
+
+func TestRunAndRemoveUpdateMountStateFile(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--port=65531", "--no-wait", "--openclaw-model-primary", "openai/gpt-5", "--openclaw-openai-api-key", "test-key"}); err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+
+	id := parseClawIDFromRunOutput(out.String())
+	if id == "" {
+		t.Fatalf("failed to parse claw id from run output: %s", out.String())
+	}
+
+	statePath := filepath.Join(data, "claws", id, "state.json")
+	state := readMountStateFile(t, statePath)
+	if !state.Active {
+		t.Fatalf("expected mount state active=true, got false")
+	}
+	if state.InstanceID != id {
+		t.Fatalf("unexpected state instance_id: %q", state.InstanceID)
+	}
+	if state.PID <= 0 {
+		t.Fatalf("expected state pid > 0, got %d", state.PID)
+	}
+	if state.SourcePath == "" {
+		t.Fatalf("expected source path in state")
+	}
+
+	out.Reset()
+	if err := application.Run([]string{"rm", id}); err != nil {
+		t.Fatalf("rm failed: %v", err)
+	}
+
+	state = readMountStateFile(t, statePath)
+	if state.Active {
+		t.Fatalf("expected mount state active=false after rm")
+	}
+	if state.InstanceID != "" || state.PID != 0 {
+		t.Fatalf("expected cleared runtime state after rm, got %+v", state)
 	}
 }
 
@@ -567,6 +625,37 @@ func TestPSMarksHTTP5xxAsUnhealthy(t *testing.T) {
 	if !strings.Contains(psOutput, "HTTP 500") {
 		t.Fatalf("ps output missing HTTP 500 error: %s", psOutput)
 	}
+}
+
+type mountStateFile struct {
+	Active     bool   `json:"active"`
+	InstanceID string `json:"instance_id"`
+	PID        int    `json:"pid"`
+	SourcePath string `json:"source_path"`
+}
+
+func parseClawIDFromRunOutput(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "CLAWID:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "CLAWID:"))
+		}
+	}
+	return ""
+}
+
+func readMountStateFile(t *testing.T, path string) mountStateFile {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read mount state %s: %v", path, err)
+	}
+
+	var state mountStateFile
+	if err := json.Unmarshal(body, &state); err != nil {
+		t.Fatalf("decode mount state %s: %v", path, err)
+	}
+	return state
 }
 
 func seedFetchedImage(t *testing.T, cacheRoot string) {
