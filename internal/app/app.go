@@ -138,11 +138,13 @@ func (a *App) runImage(args []string) error {
 }
 
 type runTarget struct {
-	Input       string
-	ImageRef    string
-	ClawID      string
-	MountSource string
-	IsClawbox   bool
+	Input                   string
+	ImageRef                string
+	ClawID                  string
+	MountSource             string
+	OpenClawModelPrimary    string
+	OpenClawGatewayAuthMode string
+	IsClawbox               bool
 }
 
 func (a *App) resolveRunTarget(input string) (runTarget, error) {
@@ -169,11 +171,13 @@ func (a *App) resolveRunTarget(input string) (runTarget, error) {
 	}
 
 	return runTarget{
-		Input:       input,
-		ImageRef:    strings.TrimSpace(header.Spec.BaseImage.Ref),
-		ClawID:      clawID,
-		MountSource: clawboxPath,
-		IsClawbox:   true,
+		Input:                   input,
+		ImageRef:                strings.TrimSpace(header.Spec.BaseImage.Ref),
+		ClawID:                  clawID,
+		MountSource:             clawboxPath,
+		OpenClawModelPrimary:    strings.TrimSpace(header.Spec.OpenClaw.ModelPrimary),
+		OpenClawGatewayAuthMode: strings.TrimSpace(header.Spec.OpenClaw.GatewayAuthMode),
+		IsClawbox:               true,
 	}, nil
 }
 
@@ -380,6 +384,18 @@ func (a *App) runRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	if openClawModelPrimary == "" && runTarget.OpenClawModelPrimary != "" {
+		openClawConfig, err = setOpenClawModelPrimary(openClawConfig, runTarget.OpenClawModelPrimary)
+		if err != nil {
+			return err
+		}
+	}
+	if openClawGatewayAuthMode == "" && runTarget.OpenClawGatewayAuthMode != "" {
+		openClawConfig, err = setOpenClawGatewayAuthMode(openClawConfig, runTarget.OpenClawGatewayAuthMode)
+		if err != nil {
+			return err
+		}
+	}
 
 	ref := runTarget.ImageRef
 	imageMeta, err := manager.Resolve(ref)
@@ -404,6 +420,11 @@ func (a *App) runRun(args []string) error {
 		return err
 	}
 
+	vmPublished := make([]vm.PortMapping, 0, len(published.Mappings))
+	for _, mapping := range published.Mappings {
+		vmPublished = append(vmPublished, vm.PortMapping{HostPort: mapping.HostPort, GuestPort: mapping.GuestPort})
+	}
+
 	id := runTarget.ClawID
 	if id == "" {
 		id, err = newClawID()
@@ -413,86 +434,102 @@ func (a *App) runRun(args []string) error {
 	}
 	instanceDir := filepath.Join(instancesRoot, id)
 	statePath := filepath.Join(instanceDir, "state")
-	if err := ensureDir(statePath); err != nil {
-		return err
-	}
 	instanceImagePath := filepath.Join(instanceDir, "instance.img")
-	if err := copyFile(imageMeta.RuntimeDisk, instanceImagePath); err != nil {
-		return err
-	}
 	mountSource := imageMeta.RuntimeDisk
 	if runTarget.MountSource != "" {
 		mountSource = runTarget.MountSource
 	}
-	if err := mountManager.Acquire(context.Background(), mount.AcquireRequest{
-		ClawID:     id,
-		SourcePath: mountSource,
-		InstanceID: id,
-	}); err != nil {
-		return err
-	}
 
-	vmPublished := make([]vm.PortMapping, 0, len(published.Mappings))
-	for _, mapping := range published.Mappings {
-		vmPublished = append(vmPublished, vm.PortMapping{HostPort: mapping.HostPort, GuestPort: mapping.GuestPort})
-	}
+	var startResult vm.StartResult
+	var instance state.Instance
+	err = mountManager.WithInstanceLock(id, func() error {
+		existing, loadErr := store.Load(id)
+		if loadErr != nil && !errors.Is(loadErr, state.ErrNotFound) {
+			return loadErr
+		}
+		if loadErr == nil && existing.PID > 0 && a.backend.IsRunning(existing.PID) {
+			return mount.ErrBusy
+		}
 
-	startResult, err := a.backend.Start(context.Background(), vm.StartSpec{
-		InstanceID:          id,
-		InstanceDir:         instanceDir,
-		ImageArch:           imageMeta.Arch,
-		SourceDiskPath:      instanceImagePath,
-		WorkspacePath:       workspacePath,
-		StatePath:           statePath,
-		GatewayHostPort:     gatewayPort,
-		GatewayGuestPort:    gatewayPort,
-		PublishedPorts:      vmPublished,
-		CPUs:                cpus,
-		MemoryMiB:           memoryMiB,
-		OpenClawPackage:     openClawPackage,
-		OpenClawConfig:      openClawConfig,
-		OpenClawEnvironment: openClawEnv,
+		if err := ensureDir(statePath); err != nil {
+			return err
+		}
+		if err := copyFile(imageMeta.RuntimeDisk, instanceImagePath); err != nil {
+			return err
+		}
+		if err := mountManager.AcquireWhileLocked(context.Background(), mount.AcquireRequest{
+			ClawID:     id,
+			SourcePath: mountSource,
+			InstanceID: id,
+		}); err != nil {
+			return err
+		}
+
+		startResult, err = a.backend.Start(context.Background(), vm.StartSpec{
+			InstanceID:          id,
+			InstanceDir:         instanceDir,
+			ImageArch:           imageMeta.Arch,
+			SourceDiskPath:      instanceImagePath,
+			WorkspacePath:       workspacePath,
+			StatePath:           statePath,
+			GatewayHostPort:     gatewayPort,
+			GatewayGuestPort:    gatewayPort,
+			PublishedPorts:      vmPublished,
+			CPUs:                cpus,
+			MemoryMiB:           memoryMiB,
+			OpenClawPackage:     openClawPackage,
+			OpenClawConfig:      openClawConfig,
+			OpenClawEnvironment: openClawEnv,
+		})
+		if err != nil {
+			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: true})
+			return err
+		}
+		if err := mountManager.AcquireWhileLocked(context.Background(), mount.AcquireRequest{
+			ClawID:     id,
+			InstanceID: id,
+			PID:        startResult.PID,
+		}); err != nil {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+			defer cancel()
+			_ = a.backend.Stop(stopCtx, startResult.PID)
+			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: true})
+			return err
+		}
+
+		now := time.Now().UTC()
+		instance = state.Instance{
+			ID:             id,
+			ImageRef:       ref,
+			WorkspacePath:  workspacePath,
+			StatePath:      statePath,
+			GatewayPort:    gatewayPort,
+			PublishedPorts: published.Mappings,
+			Status:         "booting",
+			Backend:        "qemu",
+			PID:            startResult.PID,
+			DiskPath:       startResult.DiskPath,
+			SeedISOPath:    startResult.SeedISOPath,
+			SerialLogPath:  startResult.SerialLogPath,
+			QEMULogPath:    startResult.QEMULogPath,
+			MonitorPath:    startResult.MonitorPath,
+			QEMUAccel:      startResult.Accel,
+			CreatedAtUTC:   now,
+			UpdatedAtUTC:   now,
+		}
+		if noWait {
+			instance.Status = "running"
+		}
+		if err := store.Save(instance); err != nil {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+			defer cancel()
+			_ = a.backend.Stop(stopCtx, startResult.PID)
+			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: true})
+			return err
+		}
+		return nil
 	})
 	if err != nil {
-		_ = mountManager.Release(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: true})
-		return err
-	}
-	if err := mountManager.Acquire(context.Background(), mount.AcquireRequest{
-		ClawID:     id,
-		InstanceID: id,
-		PID:        startResult.PID,
-	}); err != nil {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
-		defer cancel()
-		_ = a.backend.Stop(stopCtx, startResult.PID)
-		_ = mountManager.Release(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: true})
-		return err
-	}
-
-	now := time.Now().UTC()
-	instance := state.Instance{
-		ID:             id,
-		ImageRef:       ref,
-		WorkspacePath:  workspacePath,
-		StatePath:      statePath,
-		GatewayPort:    gatewayPort,
-		PublishedPorts: published.Mappings,
-		Status:         "booting",
-		Backend:        "qemu",
-		PID:            startResult.PID,
-		DiskPath:       startResult.DiskPath,
-		SeedISOPath:    startResult.SeedISOPath,
-		SerialLogPath:  startResult.SerialLogPath,
-		QEMULogPath:    startResult.QEMULogPath,
-		MonitorPath:    startResult.MonitorPath,
-		QEMUAccel:      startResult.Accel,
-		CreatedAtUTC:   now,
-		UpdatedAtUTC:   now,
-	}
-	if noWait {
-		instance.Status = "running"
-	}
-	if err := store.Save(instance); err != nil {
 		return err
 	}
 
@@ -717,32 +754,40 @@ func (a *App) runRemove(args []string) error {
 		return err
 	}
 
-	instance, err := store.Load(args[0])
-	if err != nil {
-		if errors.Is(err, state.ErrNotFound) {
-			return fmt.Errorf("instance %s not found", args[0])
+	id := args[0]
+	err = mountManager.WithInstanceLock(id, func() error {
+		instance, loadErr := store.Load(id)
+		if loadErr != nil {
+			if errors.Is(loadErr, state.ErrNotFound) {
+				return fmt.Errorf("instance %s not found", id)
+			}
+			return loadErr
 		}
-		return err
-	}
 
-	if instance.PID > 0 && a.backend.IsRunning(instance.PID) {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
-		defer cancel()
-		if err := a.backend.Stop(stopCtx, instance.PID); err != nil {
+		if instance.PID > 0 && a.backend.IsRunning(instance.PID) {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+			defer cancel()
+			if err := a.backend.Stop(stopCtx, instance.PID); err != nil {
+				return err
+			}
+		}
+		if err := mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: instance.ID, Unmount: true}); err != nil {
 			return err
 		}
-	}
-	if err := mountManager.Release(context.Background(), mount.ReleaseRequest{ClawID: instance.ID, Unmount: true}); err != nil {
+
+		if err := store.Delete(id); err != nil {
+			if errors.Is(err, state.ErrNotFound) {
+				return fmt.Errorf("instance %s not found", id)
+			}
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 
-	if err := store.Delete(args[0]); err != nil {
-		if errors.Is(err, state.ErrNotFound) {
-			return fmt.Errorf("instance %s not found", args[0])
-		}
-		return err
-	}
-	fmt.Fprintf(a.out, "removed %s\n", args[0])
+	fmt.Fprintf(a.out, "removed %s\n", id)
 	return nil
 }
 
@@ -1219,6 +1264,25 @@ func setOpenClawModelPrimary(configPayload string, modelPrimary string) (string,
 	defaults := ensureMapValue(agents, "defaults")
 	model := ensureMapValue(defaults, "model")
 	model["primary"] = modelPrimary
+
+	payload, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+func setOpenClawGatewayAuthMode(configPayload string, authMode string) (string, error) {
+	config := map[string]interface{}{}
+	if strings.TrimSpace(configPayload) != "" {
+		if err := json.Unmarshal([]byte(configPayload), &config); err != nil {
+			return "", fmt.Errorf("parse generated OpenClaw config JSON: %w", err)
+		}
+	}
+
+	gateway := ensureMapValue(config, "gateway")
+	auth := ensureMapValue(gateway, "auth")
+	auth["mode"] = authMode
 
 	payload, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {

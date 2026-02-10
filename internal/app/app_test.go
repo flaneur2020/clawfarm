@@ -4,25 +4,31 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/yazhou/krunclaw/internal/clawbox"
+	"github.com/yazhou/krunclaw/internal/mount"
 	"github.com/yazhou/krunclaw/internal/vm"
 )
 
 const testClawboxSHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 type fakeBackend struct {
-	nextPID  int
-	running  map[int]bool
-	lastSpec vm.StartSpec
+	mu           sync.Mutex
+	nextPID      int
+	running      map[int]bool
+	lastSpec     vm.StartSpec
+	startEntered chan struct{}
+	startGate    <-chan struct{}
 }
 
 func newFakeBackend() *fakeBackend {
@@ -30,6 +36,19 @@ func newFakeBackend() *fakeBackend {
 }
 
 func (f *fakeBackend) Start(_ context.Context, spec vm.StartSpec) (vm.StartResult, error) {
+	if f.startEntered != nil {
+		select {
+		case f.startEntered <- struct{}{}:
+		default:
+		}
+	}
+	if f.startGate != nil {
+		<-f.startGate
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	f.nextPID++
 	pid := f.nextPID
 	f.running[pid] = true
@@ -48,11 +67,15 @@ func (f *fakeBackend) Start(_ context.Context, spec vm.StartSpec) (vm.StartResul
 }
 
 func (f *fakeBackend) Stop(_ context.Context, pid int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	delete(f.running, pid)
 	return nil
 }
 
 func (f *fakeBackend) Suspend(pid int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if !f.running[pid] {
 		return os.ErrNotExist
 	}
@@ -60,6 +83,8 @@ func (f *fakeBackend) Suspend(pid int) error {
 }
 
 func (f *fakeBackend) Resume(pid int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if !f.running[pid] {
 		return os.ErrNotExist
 	}
@@ -67,6 +92,8 @@ func (f *fakeBackend) Resume(pid int) error {
 }
 
 func (f *fakeBackend) IsRunning(pid int) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.running[pid]
 }
 
@@ -245,7 +272,7 @@ func TestRunWithClawboxFileUsesComputedClawID(t *testing.T) {
 	var errOut bytes.Buffer
 	application := NewWithBackend(&out, &errOut, backend)
 
-	if err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--port=65531", "--no-wait", "--openclaw-model-primary", "openai/gpt-5", "--openclaw-openai-api-key", "test-key"}); err != nil {
+	if err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--port=65531", "--no-wait", "--openclaw-openai-api-key", "test-key", "--openclaw-gateway-token", "test-gateway-token"}); err != nil {
 		t.Fatalf("run command failed: %v", err)
 	}
 
@@ -261,6 +288,15 @@ func TestRunWithClawboxFileUsesComputedClawID(t *testing.T) {
 	}
 	if !state.Active {
 		t.Fatalf("expected active mount state")
+	}
+	if !strings.Contains(backend.lastSpec.OpenClawConfig, `"primary": "openai/gpt-5"`) {
+		t.Fatalf("expected model primary fallback from clawbox header, got config: %s", backend.lastSpec.OpenClawConfig)
+	}
+	if !strings.Contains(backend.lastSpec.OpenClawConfig, `"mode": "token"`) {
+		t.Fatalf("expected gateway auth mode fallback from clawbox header, got config: %s", backend.lastSpec.OpenClawConfig)
+	}
+	if backend.lastSpec.OpenClawEnvironment["OPENCLAW_GATEWAY_TOKEN"] != "test-gateway-token" {
+		t.Fatalf("expected gateway token env to be propagated")
 	}
 
 	out.Reset()
@@ -303,12 +339,117 @@ func TestRunDotResolvesUniqueClawboxFile(t *testing.T) {
 	var errOut bytes.Buffer
 	application := NewWithBackend(&out, &errOut, backend)
 
-	if err := application.Run([]string{"run", ".", "--workspace=" + workdir, "--port=65532", "--no-wait", "--openclaw-model-primary", "openai/gpt-5", "--openclaw-openai-api-key", "test-key"}); err != nil {
+	if err := application.Run([]string{"run", ".", "--workspace=" + workdir, "--port=65532", "--no-wait", "--openclaw-openai-api-key", "test-key", "--openclaw-gateway-token", "test-gateway-token"}); err != nil {
 		t.Fatalf("run command failed: %v", err)
 	}
 	id := parseClawIDFromRunOutput(out.String())
 	if id != expectedClawID {
 		t.Fatalf("unexpected CLAWID from run .: got %q want %q", id, expectedClawID)
+	}
+	if !strings.Contains(backend.lastSpec.OpenClawConfig, `"primary": "openai/gpt-5"`) {
+		t.Fatalf("expected model primary fallback from clawbox header, got config: %s", backend.lastSpec.OpenClawConfig)
+	}
+	if !strings.Contains(backend.lastSpec.OpenClawConfig, `"mode": "token"`) {
+		t.Fatalf("expected gateway auth mode fallback from clawbox header, got config: %s", backend.lastSpec.OpenClawConfig)
+	}
+}
+
+func TestRunClawboxExplicitOpenClawFlagsOverrideHeaderDefaults(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+	workspace := t.TempDir()
+	clawboxPath := writeTestClawboxFile(t, workspace, "demo-openclaw.clawbox", "demo-openclaw", "ubuntu:24.04")
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--openclaw-model-primary", "anthropic/claude-3-5-sonnet-latest", "--openclaw-anthropic-api-key", "anthropic-key", "--openclaw-gateway-auth-mode", "none"})
+	if err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+
+	requirements, err := parseOpenClawRuntimeRequirements(backend.lastSpec.OpenClawConfig)
+	if err != nil {
+		t.Fatalf("parse generated OpenClaw config: %v", err)
+	}
+	if requirements.ModelPrimary != "anthropic/claude-3-5-sonnet-latest" {
+		t.Fatalf("expected model primary override to win, got %q", requirements.ModelPrimary)
+	}
+	if requirements.GatewayAuthMode != "none" {
+		t.Fatalf("expected gateway auth mode override to win, got %q", requirements.GatewayAuthMode)
+	}
+	if backend.lastSpec.OpenClawEnvironment["OPENCLAW_GATEWAY_TOKEN"] != "" {
+		t.Fatalf("did not expect gateway token env when auth mode is none")
+	}
+}
+
+func TestConcurrentRunSameClawboxReturnsBusy(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+	workspace := t.TempDir()
+	clawboxPath := writeTestClawboxFile(t, workspace, "demo-openclaw.clawbox", "demo-openclaw", "ubuntu:24.04")
+
+	startEntered := make(chan struct{}, 1)
+	startGate := make(chan struct{})
+	backend := newFakeBackend()
+	backend.startEntered = startEntered
+	backend.startGate = startGate
+
+	var outOne bytes.Buffer
+	var errOutOne bytes.Buffer
+	var outTwo bytes.Buffer
+	var errOutTwo bytes.Buffer
+	appOne := NewWithBackend(&outOne, &errOutOne, backend)
+	appTwo := NewWithBackend(&outTwo, &errOutTwo, backend)
+
+	runArgs := []string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--openclaw-openai-api-key", "test-key", "--openclaw-gateway-token", "test-gateway-token"}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- appOne.Run(runArgs)
+	}()
+
+	select {
+	case <-startEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for first run to reach backend start")
+	}
+
+	err := appTwo.Run(runArgs)
+	if !errors.Is(err, mount.ErrBusy) {
+		t.Fatalf("expected mount.ErrBusy for concurrent run, got %v", err)
+	}
+
+	close(startGate)
+	select {
+	case firstErr := <-errCh:
+		if firstErr != nil {
+			t.Fatalf("first run should succeed, got %v", firstErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first run completion")
 	}
 }
 

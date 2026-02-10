@@ -115,6 +115,50 @@ func TestAcquireReusesMountedSourceWithoutRemount(t *testing.T) {
 	}
 }
 
+func TestWithInstanceLockAndAcquireWhileLocked(t *testing.T) {
+	root := t.TempDir()
+	locker := &fakeLocker{ok: true}
+	mounter := &fakeMounter{isMounted: false}
+	manager := NewManager(root, locker, mounter)
+
+	err := manager.WithInstanceLock("demo-123", func() error {
+		if err := manager.AcquireWhileLocked(context.Background(), AcquireRequest{
+			ClawID:     "demo-123",
+			SourcePath: filepath.Join(root, "demo.clawbox"),
+			InstanceID: "claw-001",
+			PID:        1234,
+		}); err != nil {
+			return err
+		}
+		return manager.ReleaseWhileLocked(context.Background(), ReleaseRequest{ClawID: "demo-123", Unmount: true})
+	})
+	if err != nil {
+		t.Fatalf("WithInstanceLock failed: %v", err)
+	}
+
+	state, err := manager.Inspect("demo-123")
+	if err != nil {
+		t.Fatalf("Inspect failed: %v", err)
+	}
+	if state.Active {
+		t.Fatalf("expected inactive state after release")
+	}
+	if mounter.mountCalls != 1 {
+		t.Fatalf("expected exactly one mount call, got %d", mounter.mountCalls)
+	}
+	if mounter.unmountCalls != 1 {
+		t.Fatalf("expected exactly one unmount call, got %d", mounter.unmountCalls)
+	}
+}
+
+func TestWithInstanceLockFailsWhenBusy(t *testing.T) {
+	manager := NewManager(t.TempDir(), &fakeLocker{ok: false}, &fakeMounter{})
+	err := manager.WithInstanceLock("demo-123", func() error { return nil })
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("expected ErrBusy, got %v", err)
+	}
+}
+
 func TestRecoverResetsStateAndUnmounts(t *testing.T) {
 	root := t.TempDir()
 	mounter := &fakeMounter{isMounted: true}
