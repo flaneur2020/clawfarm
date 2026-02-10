@@ -10,11 +10,20 @@
 本 RFC 定义 `Clawbox` 的单文件可挂载格式：
 
 - 一个 `.clawbox` 文件即可分发；
-- 运行时将该文件挂载到 `~/.clawfarm/claws/{CLAWID}`；
-- `CLAWID` 必须来自该 `.clawbox` 文件头部元信息（不是运行时随机生成）；
+- 运行时将该文件挂载到 `~/.clawfarm/claws/{CLAWID}/mount`；
+- 限制一个 .clawbox 文件只能打开一次；
 - 挂载内容只读，运行时变更通过 overlay（如 `run.qcow2`）记录。
 
 该设计用于支撑稳定分享、可重复运行、以及可审计的实例来源追踪。
+
+## 1.1 架构总览（Architecture Overview）
+
+该架构的核心是“单文件分发 + 只读挂载 + 运行写层 + 生命周期闭环”：
+
+1. 单文件可挂载：`.clawbox` 作为唯一分发单元，运行时挂载到 `~/.clawfarm/claws/{CLAWID}/mount`。
+2. 不可变与可变分离：`mount/` 保持只读；运行态写入 `run.qcow2`、`state.json`、日志等可变数据。
+3. 稳定身份与状态：`CLAWID` 由 `name + inode hash` 计算，实例目录、锁与状态均围绕该 ID 管理。
+4. 运行与导出闭环：`run` 启动前 preflight 必填 env；`export` 导出前脱敏扫描；`checkpoint/restore` 支持回滚。
 
 ---
 
@@ -35,8 +44,8 @@
 ## 3.1 Goals
 
 - **G1:** `Clawbox` 成为单文件（`.clawbox`）可分发对象；
-- **G2:** 运行时统一挂载到 `~/.clawfarm/claws/{CLAWID}`；
-- **G3:** `CLAWID` 从文件元信息读取并作为实例来源标识；
+- **G2:** 运行时统一挂载到 `~/.clawfarm/claws/{CLAWID}/mount`；
+- **G3:** `CLAWID` 从文件元信息的 name 和 inode 号码的哈希组成；
 - **G4:** 包体只读，运行变更不污染包体；
 - **G5:** 校验（hash/完整性）在挂载前完成。
 
@@ -115,8 +124,8 @@
 1. 读取 header，计算得到 `claw_id`；
 2. 创建目录：`~/.clawfarm/claws/{CLAWID}`；
 3. 挂载到目录：`~/.clawfarm/claws/{CLAWID}/mount`；
-3. 挂载 `.clawbox` payload 到该路径（只读）；
-4. 后续运行从该路径读取 `spec` 与 artifacts。
+4. 挂载 `.clawbox` payload 到该路径（只读）；
+5. 后续运行从该路径读取 `spec` 与 artifacts。
 
 ## 6.2 挂载前校验
 
@@ -124,7 +133,7 @@
 
 - header schema version 校验；
 - `claw_id` 合法性校验；
-- payload `sha256` 校验；
+- payload `sha256` 校验；（在启动时候指定参数时）
 - 可选签名校验（后续扩展）。
 
 ## 6.3 只读要求
@@ -146,7 +155,7 @@
       state.json         # 运行状态记录
       env                # 环境变量文件
   blobs/
-    <BLOBSHA256>        # blob 文件 (包括基础镜像的内容)
+    <BLOBSHA256>        # blob 文件 (包括基础镜像的内容、其他 layer qcow2 镜像的内容)
 ```
 
 ---
@@ -156,7 +165,7 @@
 ## 8.1 `clawfarm run <file.clawbox> --env <path>`
 
 - 从 `.clawbox` 读取 `CLAWID`；
-- 挂载到 `~/.clawfarm/claws/{CLAWID}`；
+- 挂载到 `~/.clawfarm/claws/{CLAWID}/mount`；
 - 读取 `spec.openclaw.required_env` 并在启动前 preflight；
 - 缺失必填项：
   - 交互模式：TUI 引导输入（secret 显示 `*`）；
@@ -171,8 +180,8 @@
 
 - 导出为单文件 `.clawbox`；
 - 可选提供一个 `--name`;
-- save 时，需要先 suspend 掉 claw 实例，save 后恢复执行。
-- save 时，应当允许指定 `--squash` 将 run.qcow2 合并到 layers 中的 qcow2 文件，使 layers 只有一层。
+- export 时，需要先 suspend 掉 claw 实例，export 后恢复执行。
+- export 时，应当允许指定 `--squash` 将 run.qcow2 合并到 layers 中的 qcow2 文件，使 layers 只有一层。
 
 ## 8.4 `clawfarm checkpoint <CLAWID> --name <name>`
 
@@ -189,7 +198,7 @@
 ## 9. 安全与合规
 
 - `.clawbox` 不得包含明文 secrets；
-- `save` 前进行脱敏扫描；
+- `export` 前进行脱敏扫描；
 - 默认阻断疑似 secret 导出；
 - mount root 只读，避免运行时污染分享包。
 
@@ -206,7 +215,7 @@
 1. **M1:** `clawbox` header/spec 解析与校验；
 2. **M2:** mount lifecycle（挂载/卸载/复用）；
 3. **M3:** `run` 集成 `CLAWID` 路径与 preflight；
-4. **M4:** `save` 导出单文件 + 扫描；
+4. **M4:** `export` 导出单文件 + 扫描；
 5. **M5:** `pack/unpack` 迁移工具。
 
 ---
@@ -215,10 +224,9 @@
 
 满足以下即视为 RFC 落地：
 
-1. `clawfarm run demo.clawbox` 可把包挂载到 `~/.clawfarm/claws/{CLAWID}`；
-2. `CLAWID` 来自包内 header 字段且可审计；
-3. 缺失必填 env 时，能在 VM 启动前完成引导或失败；
-4. `save` 产出单文件 `.clawbox` 并默认执行脱敏策略。
+1. `clawfarm run demo.clawbox` 可把包挂载到 `~/.clawfarm/claws/{CLAWID}/mount`；
+2. 缺失必填 env 时，能在 VM 启动前完成引导或失败；
+3. `export` 产出单文件 `.clawbox` 并默认执行脱敏策略。
 
 ---
 
