@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VCLAW_BIN="${VCLAW_BIN:-${ROOT_DIR}/vclaw}"
+CLAWFARM_BIN="${CLAWFARM_BIN:-${ROOT_DIR}/vclaw}"
 INTEGRATION_IMAGE_REF="${INTEGRATION_IMAGE_REF:-ubuntu:24.04}"
 INTEGRATION_GATEWAY_PORT="${INTEGRATION_GATEWAY_PORT:-19289}"
 INTEGRATION_READY_TIMEOUT_SECS="${INTEGRATION_READY_TIMEOUT_SECS:-300}"
@@ -24,7 +24,7 @@ sanitize_ref() {
 
 cleanup() {
   if [[ -n "${CLAWID}" ]]; then
-    HOME="${HOME_DIR}" "${VCLAW_BIN}" rm "${CLAWID}" >/dev/null 2>&1 || true
+    HOME="${HOME_DIR}" "${CLAWFARM_BIN}" rm "${CLAWID}" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -33,16 +33,16 @@ rm -rf "${TEST_TMP}"
 mkdir -p "${TEST_TMP}" "${HOME_DIR}" "${WORKDIR}"
 printf 'integration-002 %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >"${WORKDIR}/integration-002.txt"
 
-echo "[002-cache-copy] using binary: ${VCLAW_BIN}"
-if [[ ! -x "${VCLAW_BIN}" ]]; then
-  echo "[002-cache-copy] error: binary not found or not executable: ${VCLAW_BIN}" >&2
+echo "[002-cache-copy] using binary: ${CLAWFARM_BIN}"
+if [[ ! -x "${CLAWFARM_BIN}" ]]; then
+  echo "[002-cache-copy] error: binary not found or not executable: ${CLAWFARM_BIN}" >&2
   echo "[002-cache-copy] hint: go build -o vclaw ./cmd/vclaw" >&2
   exit 1
 fi
 
 echo "[002-cache-copy] fetching image with isolated HOME"
 set +e
-HOME="${HOME_DIR}" "${VCLAW_BIN}" image fetch "${INTEGRATION_IMAGE_REF}" >"${FETCH_LOG}" 2>&1
+HOME="${HOME_DIR}" "${CLAWFARM_BIN}" image fetch "${INTEGRATION_IMAGE_REF}" >"${FETCH_LOG}" 2>&1
 FETCH_EXIT=$?
 set -e
 if [[ "${FETCH_EXIT}" -ne 0 ]]; then
@@ -59,7 +59,7 @@ fi
 
 echo "[002-cache-copy] fetching image again should be cached (no download)"
 set +e
-HOME="${HOME_DIR}" "${VCLAW_BIN}" image fetch "${INTEGRATION_IMAGE_REF}" >"${TEST_TMP}/second-fetch.log" 2>&1
+HOME="${HOME_DIR}" "${CLAWFARM_BIN}" image fetch "${INTEGRATION_IMAGE_REF}" >"${TEST_TMP}/second-fetch.log" 2>&1
 SECOND_FETCH_EXIT=$?
 set -e
 if [[ "${SECOND_FETCH_EXIT}" -ne 0 ]]; then
@@ -91,7 +91,7 @@ fi
 
 echo "[002-cache-copy] creating instance"
 set +e
-HOME="${HOME_DIR}" "${VCLAW_BIN}" run "${INTEGRATION_IMAGE_REF}" \
+HOME="${HOME_DIR}" "${CLAWFARM_BIN}" run "${INTEGRATION_IMAGE_REF}" \
   --workspace="${WORKDIR}" \
   --port="${INTEGRATION_GATEWAY_PORT}" \
   --ready-timeout-secs="${INTEGRATION_READY_TIMEOUT_SECS}" \

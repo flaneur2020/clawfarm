@@ -3,8 +3,8 @@ package app
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -190,11 +190,11 @@ type runSpecJSONEnvelope struct {
 }
 
 type runSpecJSONBody struct {
-	Name      string                `json:"name,omitempty"`
-	BaseImage clawbox.BaseImage     `json:"base_image"`
-	Layers    []clawbox.Layer       `json:"layers,omitempty"`
-	OpenClaw  clawbox.OpenClawSpec  `json:"openclaw"`
-	Provision []string              `json:"provision,omitempty"`
+	Name      string               `json:"name,omitempty"`
+	BaseImage clawbox.BaseImage    `json:"base_image"`
+	Layers    []clawbox.Layer      `json:"layers,omitempty"`
+	OpenClaw  clawbox.OpenClawSpec `json:"openclaw"`
+	Provision []string             `json:"provision,omitempty"`
 }
 
 type preparedRunTarget struct {
@@ -726,12 +726,12 @@ func (a *App) runProvisionCommands(ctx context.Context, instanceDir string, base
 
 	env := append([]string{}, os.Environ()...)
 	env = append(env,
-		"VCLAW_BASE_IMAGE="+baseImagePath,
-		"VCLAW_INSTANCE_IMAGE="+instanceImagePath,
-		"VCLAW_LAYER_COUNT="+strconv.Itoa(len(layerPaths)),
+		"CLAWFARM_BASE_IMAGE="+baseImagePath,
+		"CLAWFARM_INSTANCE_IMAGE="+instanceImagePath,
+		"CLAWFARM_LAYER_COUNT="+strconv.Itoa(len(layerPaths)),
 	)
 	for index, path := range layerPaths {
-		env = append(env, fmt.Sprintf("VCLAW_LAYER_%d=%s", index+1, path))
+		env = append(env, fmt.Sprintf("CLAWFARM_LAYER_%d=%s", index+1, path))
 	}
 
 	for index, command := range commands {
@@ -1022,7 +1022,7 @@ func (a *App) runRun(args []string) error {
 
 	var startResult vm.StartResult
 	var instance state.Instance
-		err = mountManager.WithInstanceLock(id, func() error {
+	err = mountManager.WithInstanceLock(id, func() error {
 		existing, loadErr := store.Load(id)
 		if loadErr != nil && !errors.Is(loadErr, state.ErrNotFound) {
 			return loadErr
@@ -1031,28 +1031,28 @@ func (a *App) runRun(args []string) error {
 			return mount.ErrBusy
 		}
 
-			if err := ensureDir(statePath); err != nil {
-				return err
-			}
-			if err := copyFile(imageMeta.RuntimeDisk, instanceImagePath); err != nil {
-				return err
-			}
+		if err := ensureDir(statePath); err != nil {
+			return err
+		}
+		if err := copyFile(imageMeta.RuntimeDisk, instanceImagePath); err != nil {
+			return err
+		}
 
-			acquireRequest := mount.AcquireRequest{
-				ClawID:     id,
-				InstanceID: id,
-			}
-			if !runTarget.SkipMount {
-				acquireRequest.SourcePath = mountSource
-			}
-			if err := mountManager.AcquireWhileLocked(context.Background(), acquireRequest); err != nil {
-				return err
-			}
+		acquireRequest := mount.AcquireRequest{
+			ClawID:     id,
+			InstanceID: id,
+		}
+		if !runTarget.SkipMount {
+			acquireRequest.SourcePath = mountSource
+		}
+		if err := mountManager.AcquireWhileLocked(context.Background(), acquireRequest); err != nil {
+			return err
+		}
 
-			if err := a.runProvisionCommands(context.Background(), instanceDir, imageMeta.RuntimeDisk, instanceImagePath, preparedTarget.LayerPaths, preparedTarget.ProvisionCommands); err != nil {
-				_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
-				return err
-			}
+		if err := a.runProvisionCommands(context.Background(), instanceDir, imageMeta.RuntimeDisk, instanceImagePath, preparedTarget.LayerPaths, preparedTarget.ProvisionCommands); err != nil {
+			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+			return err
+		}
 
 		startResult, err = a.backend.Start(context.Background(), vm.StartSpec{
 			InstanceID:          id,
@@ -1070,21 +1070,21 @@ func (a *App) runRun(args []string) error {
 			OpenClawConfig:      openClawConfig,
 			OpenClawEnvironment: openClawEnv,
 		})
-			if err != nil {
-				_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
-				return err
-			}
+		if err != nil {
+			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+			return err
+		}
 		if err := mountManager.AcquireWhileLocked(context.Background(), mount.AcquireRequest{
 			ClawID:     id,
 			InstanceID: id,
 			PID:        startResult.PID,
 		}); err != nil {
-				stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
-				defer cancel()
-				_ = a.backend.Stop(stopCtx, startResult.PID)
-				_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
-				return err
-			}
+			stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+			defer cancel()
+			_ = a.backend.Stop(stopCtx, startResult.PID)
+			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+			return err
+		}
 
 		now := time.Now().UTC()
 		instance = state.Instance{
@@ -1109,13 +1109,13 @@ func (a *App) runRun(args []string) error {
 		if noWait {
 			instance.Status = "running"
 		}
-			if err := store.Save(instance); err != nil {
-				stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
-				defer cancel()
-				_ = a.backend.Stop(stopCtx, startResult.PID)
-				_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
-				return err
-			}
+		if err := store.Save(instance); err != nil {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+			defer cancel()
+			_ = a.backend.Stop(stopCtx, startResult.PID)
+			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+			return err
+		}
 		return nil
 	})
 	if err != nil {

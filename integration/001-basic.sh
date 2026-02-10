@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VCLAW_BIN="${VCLAW_BIN:-${ROOT_DIR}/vclaw}"
+CLAWFARM_BIN="${CLAWFARM_BIN:-${ROOT_DIR}/vclaw}"
 INTEGRATION_GATEWAY_PORT="${INTEGRATION_GATEWAY_PORT:-18789}"
 INTEGRATION_CANVAS_PORT="${INTEGRATION_CANVAS_PORT:-18793}"
 INTEGRATION_IMAGE_REF="${INTEGRATION_IMAGE_REF:-ubuntu:24.04}"
@@ -20,21 +20,21 @@ rm -rf "${TEST_TMP}"
 mkdir -p "${TEST_TMP}" "${CACHE_DIR}" "${DATA_DIR}" "${WORKDIR}"
 printf 'integration-001 %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >"${WORKDIR}/integration-001.txt"
 
-echo "[001-basic] using binary: ${VCLAW_BIN}"
-if [[ ! -x "${VCLAW_BIN}" ]]; then
-  echo "[001-basic] error: binary not found or not executable: ${VCLAW_BIN}" >&2
+echo "[001-basic] using binary: ${CLAWFARM_BIN}"
+if [[ ! -x "${CLAWFARM_BIN}" ]]; then
+  echo "[001-basic] error: binary not found or not executable: ${CLAWFARM_BIN}" >&2
   echo "[001-basic] hint: go build -o vclaw ./cmd/vclaw" >&2
   exit 1
 fi
 
 echo "[001-basic] checking core CLI entrypoints"
-"${VCLAW_BIN}" --help >/dev/null
-"${VCLAW_BIN}" image ls >/dev/null || true
-"${VCLAW_BIN}" ps >/dev/null || true
+"${CLAWFARM_BIN}" --help >/dev/null
+"${CLAWFARM_BIN}" image ls >/dev/null || true
+"${CLAWFARM_BIN}" ps >/dev/null || true
 
 echo "[001-basic] fetching image metadata/artifacts"
-VCLAW_CACHE_DIR="${CACHE_DIR}" VCLAW_DATA_DIR="${DATA_DIR}" \
-  "${VCLAW_BIN}" image fetch "${INTEGRATION_IMAGE_REF}"
+CLAWFARM_CACHE_DIR="${CACHE_DIR}" CLAWFARM_DATA_DIR="${DATA_DIR}" \
+  "${CLAWFARM_BIN}" image fetch "${INTEGRATION_IMAGE_REF}"
 
 if [[ "${INTEGRATION_ENABLE_RUN}" != "1" ]]; then
   echo "[001-basic] run stage skipped (set INTEGRATION_ENABLE_RUN=1 to enable)"
@@ -43,8 +43,8 @@ fi
 
 echo "[001-basic] starting vclaw run"
 set +e
-VCLAW_CACHE_DIR="${CACHE_DIR}" VCLAW_DATA_DIR="${DATA_DIR}" \
-  "${VCLAW_BIN}" run "${INTEGRATION_IMAGE_REF}" \
+CLAWFARM_CACHE_DIR="${CACHE_DIR}" CLAWFARM_DATA_DIR="${DATA_DIR}" \
+  "${CLAWFARM_BIN}" run "${INTEGRATION_IMAGE_REF}" \
     --workspace="${WORKDIR}" \
     --port="${INTEGRATION_GATEWAY_PORT}" \
     --publish "${INTEGRATION_CANVAS_PORT}:80" \
@@ -77,15 +77,15 @@ for ((i=1; i<=INTEGRATION_PROBE_TIMEOUT_SECS; i++)); do
   sleep 1
   if [[ $i -eq INTEGRATION_PROBE_TIMEOUT_SECS ]]; then
     echo "[001-basic] error: gateway probe failed after ${INTEGRATION_PROBE_TIMEOUT_SECS}s" >&2
-    VCLAW_CACHE_DIR="${CACHE_DIR}" VCLAW_DATA_DIR="${DATA_DIR}" "${VCLAW_BIN}" ps || true
+    CLAWFARM_CACHE_DIR="${CACHE_DIR}" CLAWFARM_DATA_DIR="${DATA_DIR}" "${CLAWFARM_BIN}" ps || true
     exit 1
   fi
 done
 
 echo "[001-basic] checking instance appears in ps"
-VCLAW_CACHE_DIR="${CACHE_DIR}" VCLAW_DATA_DIR="${DATA_DIR}" "${VCLAW_BIN}" ps
+CLAWFARM_CACHE_DIR="${CACHE_DIR}" CLAWFARM_DATA_DIR="${DATA_DIR}" "${CLAWFARM_BIN}" ps
 
 echo "[001-basic] cleaning up ${CLAWID}"
-VCLAW_CACHE_DIR="${CACHE_DIR}" VCLAW_DATA_DIR="${DATA_DIR}" "${VCLAW_BIN}" rm "${CLAWID}"
+CLAWFARM_CACHE_DIR="${CACHE_DIR}" CLAWFARM_DATA_DIR="${DATA_DIR}" "${CLAWFARM_BIN}" rm "${CLAWID}"
 
 echo "[001-basic] integration success"

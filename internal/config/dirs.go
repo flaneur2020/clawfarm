@@ -6,9 +6,9 @@ import (
 )
 
 const (
-	envVClawHome = "VCLAW_HOME"
-	envCacheDir  = "VCLAW_CACHE_DIR"
-	envDataDir   = "VCLAW_DATA_DIR"
+	envClawfarmHome = "CLAWFARM_HOME"
+	envCacheDir     = "CLAWFARM_CACHE_DIR"
+	envDataDir      = "CLAWFARM_DATA_DIR"
 )
 
 func CacheDir() (string, error) {
@@ -26,12 +26,12 @@ func DataDir() (string, error) {
 }
 
 func baseDir() (string, error) {
-	if custom := os.Getenv(envVClawHome); custom != "" {
+	if custom := os.Getenv(envClawfarmHome); custom != "" {
 		return custom, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".vclaw"), nil
+	return filepath.Join(home, ".clawfarm"), nil
 }

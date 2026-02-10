@@ -506,13 +506,13 @@ if ! mountpoint -q /root/.openclaw; then
   mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 state /root/.openclaw || true
 fi
 
-cat >/etc/vclaw/openclaw.json <<'VCLAW_OPENCLAW_JSON'
+cat >/etc/vclaw/openclaw.json <<'CLAWFARM_OPENCLAW_JSON'
 %s
-VCLAW_OPENCLAW_JSON
+CLAWFARM_OPENCLAW_JSON
 
-cat >/etc/vclaw/openclaw.env <<'VCLAW_OPENCLAW_ENV'
+cat >/etc/vclaw/openclaw.env <<'CLAWFARM_OPENCLAW_ENV'
 %s
-VCLAW_OPENCLAW_ENV
+CLAWFARM_OPENCLAW_ENV
 chmod 0600 /etc/vclaw/openclaw.env
 
 cat >/usr/local/bin/vclaw-gateway.sh <<'SCRIPT'

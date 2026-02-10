@@ -123,14 +123,14 @@ func TestNormalizeRunArgs(t *testing.T) {
 func TestRunFlowAndInstanceLifecycle(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 
@@ -197,14 +197,14 @@ func TestRunFlowAndInstanceLifecycle(t *testing.T) {
 func TestRunAndRemoveUpdateMountStateFile(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 
@@ -254,14 +254,14 @@ func TestRunAndRemoveUpdateMountStateFile(t *testing.T) {
 func TestRunWithClawboxFileUsesComputedClawID(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 	workspace := t.TempDir()
@@ -312,14 +312,14 @@ func TestRunWithClawboxFileUsesComputedClawID(t *testing.T) {
 func TestRunDotResolvesUniqueClawboxFile(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 	workdir := t.TempDir()
@@ -361,14 +361,14 @@ func TestRunDotResolvesUniqueClawboxFile(t *testing.T) {
 func TestRunClawboxExplicitOpenClawFlagsOverrideHeaderDefaults(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 	workspace := t.TempDir()
@@ -402,14 +402,14 @@ func TestRunClawboxExplicitOpenClawFlagsOverrideHeaderDefaults(t *testing.T) {
 func TestConcurrentRunSameClawboxReturnsBusy(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 	workspace := t.TempDir()
@@ -460,14 +460,14 @@ func TestConcurrentRunSameClawboxReturnsBusy(t *testing.T) {
 func TestRunClawboxRequiredEnvFailsFastWhenMissing(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 	workspace := t.TempDir()
@@ -497,14 +497,14 @@ func TestRunClawboxRequiredEnvFailsFastWhenMissing(t *testing.T) {
 func TestRunClawboxRequiredEnvCanBeProvidedByOpenClawEnv(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 	workspace := t.TempDir()
@@ -563,10 +563,10 @@ func TestRunJSONSpecClawboxDownloadsAndRunsWithoutMount(t *testing.T) {
 		t.Fatalf("set HOME env: %v", err)
 	}
 	defer os.Unsetenv("HOME")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	basePayload := []byte("json-spec-base-image")
 	baseSHA := sha256Hex(basePayload)
@@ -660,10 +660,10 @@ func TestRunJSONSpecClawboxUsesCachedArtifactsWithoutRedownload(t *testing.T) {
 		t.Fatalf("set HOME env: %v", err)
 	}
 	defer os.Unsetenv("HOME")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	basePayload := []byte("json-spec-cached-base")
 	baseSHA := sha256Hex(basePayload)
@@ -738,10 +738,10 @@ func TestRunJSONSpecClawboxFailsOnSHA256Mismatch(t *testing.T) {
 		t.Fatalf("set HOME env: %v", err)
 	}
 	defer os.Unsetenv("HOME")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		_, _ = writer.Write([]byte("wrong-content"))
@@ -790,14 +790,14 @@ func TestRunJSONSpecClawboxFailsOnSHA256Mismatch(t *testing.T) {
 func TestExportCopiesClawboxSource(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 	workspace := t.TempDir()
@@ -841,14 +841,14 @@ func TestExportCopiesClawboxSource(t *testing.T) {
 func TestExportWithNameOverridesHeaderName(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 	workspace := t.TempDir()
@@ -887,14 +887,14 @@ func TestExportWithNameOverridesHeaderName(t *testing.T) {
 func TestExportWithInvalidNameFails(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 	workspace := t.TempDir()
@@ -925,14 +925,14 @@ func TestExportWithInvalidNameFails(t *testing.T) {
 func TestExportBlocksPossibleSecretsByDefault(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 	workspace := t.TempDir()
@@ -971,14 +971,14 @@ func TestExportBlocksPossibleSecretsByDefault(t *testing.T) {
 func TestExportAllowsPossibleSecretsWithFlag(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 	workspace := t.TempDir()
@@ -1019,14 +1019,14 @@ func TestExportAllowsPossibleSecretsWithFlag(t *testing.T) {
 func TestExportFailsForNonClawboxInstance(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 
@@ -1055,14 +1055,14 @@ func TestExportFailsForNonClawboxInstance(t *testing.T) {
 func TestExportFailsWhenInstanceLockBusy(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 	workspace := t.TempDir()
@@ -1122,14 +1122,14 @@ func TestExportFailsWhenInstanceLockBusy(t *testing.T) {
 func TestCheckpointAndRestoreCopiesDisk(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 
@@ -1209,14 +1209,14 @@ func TestCheckpointRequiresName(t *testing.T) {
 func TestRestoreFailsWhenCheckpointMissing(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 
@@ -1245,14 +1245,14 @@ func TestRestoreFailsWhenCheckpointMissing(t *testing.T) {
 func TestRunRequiresImage(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	backend := newFakeBackend()
 	var out bytes.Buffer
@@ -1271,14 +1271,14 @@ func TestRunRequiresImage(t *testing.T) {
 func TestRunWaitTimeout(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 
@@ -1299,14 +1299,14 @@ func TestRunWaitTimeout(t *testing.T) {
 func TestImageLSShowsDownloadedMarker(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	backend := newFakeBackend()
 	var out bytes.Buffer
@@ -1336,14 +1336,14 @@ func TestImageLSShowsDownloadedMarker(t *testing.T) {
 func TestRunPassesExpandedOpenClawParameters(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 
@@ -1445,14 +1445,14 @@ func TestRunPassesExpandedOpenClawParameters(t *testing.T) {
 func TestRunFailsFastForMissingRequiredOpenClawParameters(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 
@@ -1476,14 +1476,14 @@ func TestRunFailsFastForMissingRequiredOpenClawParameters(t *testing.T) {
 func TestRunPromptsForMissingRequiredOpenClawParameters(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 
@@ -1518,14 +1518,14 @@ func TestRunPromptsForMissingRequiredOpenClawParameters(t *testing.T) {
 func TestRunRejectsUnsupportedModelProvider(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 
@@ -1549,14 +1549,14 @@ func TestRunRejectsUnsupportedModelProvider(t *testing.T) {
 func TestPSShowsUnhealthyStatusWhenGatewayUnavailable(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 
@@ -1594,14 +1594,14 @@ func TestPSShowsUnhealthyStatusWhenGatewayUnavailable(t *testing.T) {
 func TestPSMarksHTTP5xxAsUnhealthy(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
-	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
 		t.Fatalf("set cache env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_CACHE_DIR")
-	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
 		t.Fatalf("set data env: %v", err)
 	}
-	defer os.Unsetenv("VCLAW_DATA_DIR")
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
 
 	seedFetchedImage(t, cache)
 
