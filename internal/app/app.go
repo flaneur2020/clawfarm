@@ -73,6 +73,8 @@ func (a *App) Run(args []string) error {
 		return a.runResume(args[1:])
 	case "rm":
 		return a.runRemove(args[1:])
+	case "export":
+		return a.runExport(args[1:])
 	case "help", "-h", "--help":
 		a.printUsage()
 		return nil
@@ -791,6 +793,70 @@ func (a *App) runRemove(args []string) error {
 	return nil
 }
 
+func (a *App) runExport(args []string) error {
+	if len(args) != 2 {
+		return errors.New("usage: vclaw export <clawid> <output.clawbox>")
+	}
+	id := strings.TrimSpace(args[0])
+	outputPath := strings.TrimSpace(args[1])
+	if outputPath == "" {
+		return errors.New("output path is required")
+	}
+	if !strings.HasSuffix(strings.ToLower(outputPath), ".clawbox") {
+		return fmt.Errorf("output path %s must end with .clawbox", outputPath)
+	}
+	absOutputPath, err := filepath.Abs(outputPath)
+	if err != nil {
+		return err
+	}
+
+	store, _, err := a.instanceStore()
+	if err != nil {
+		return err
+	}
+	mountManager, err := a.mountManager()
+	if err != nil {
+		return err
+	}
+
+	err = mountManager.WithInstanceLock(id, func() error {
+		if _, loadErr := store.Load(id); loadErr != nil {
+			if errors.Is(loadErr, state.ErrNotFound) {
+				return fmt.Errorf("instance %s not found", id)
+			}
+			return loadErr
+		}
+
+		mountState, inspectErr := mountManager.Inspect(id)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		sourcePath := strings.TrimSpace(mountState.SourcePath)
+		if sourcePath == "" {
+			return fmt.Errorf("instance %s has no exportable clawbox source", id)
+		}
+		if !strings.HasSuffix(strings.ToLower(sourcePath), ".clawbox") {
+			return fmt.Errorf("instance %s is not clawbox-backed (source: %s)", id, sourcePath)
+		}
+
+		absSourcePath, absErr := filepath.Abs(sourcePath)
+		if absErr != nil {
+			return absErr
+		}
+		if absSourcePath == absOutputPath {
+			return errors.New("output path must be different from source clawbox path")
+		}
+
+		return copyFile(absSourcePath, absOutputPath)
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(a.out, "exported %s -> %s\n", id, absOutputPath)
+	return nil
+}
+
 func (a *App) imageManager() (*images.Manager, error) {
 	cacheDir, err := config.CacheDir()
 	if err != nil {
@@ -857,6 +923,7 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.out, "  vclaw suspend <clawid>")
 	fmt.Fprintln(a.out, "  vclaw resume <clawid>")
 	fmt.Fprintln(a.out, "  vclaw rm <clawid>")
+	fmt.Fprintln(a.out, "  vclaw export <clawid> <output.clawbox>")
 	fmt.Fprintln(a.out, "")
 	fmt.Fprintln(a.out, "Examples:")
 	fmt.Fprintln(a.out, "  vclaw image fetch ubuntu:24.04")

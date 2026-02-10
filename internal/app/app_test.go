@@ -481,6 +481,160 @@ func TestRunDotFailsWhenMultipleClawboxFilesExist(t *testing.T) {
 	}
 }
 
+func TestExportCopiesClawboxSource(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+	workspace := t.TempDir()
+	clawboxPath := writeTestClawboxFile(t, workspace, "demo-openclaw.clawbox", "demo-openclaw", "ubuntu:24.04")
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--openclaw-openai-api-key", "test-key", "--openclaw-gateway-token", "test-gateway-token"}); err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+	id := parseClawIDFromRunOutput(out.String())
+	if id == "" {
+		t.Fatalf("failed to parse CLAWID from run output: %s", out.String())
+	}
+
+	exportPath := filepath.Join(t.TempDir(), "exported.clawbox")
+	out.Reset()
+	if err := application.Run([]string{"export", id, exportPath}); err != nil {
+		t.Fatalf("export command failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "exported "+id) {
+		t.Fatalf("export output missing success marker: %s", out.String())
+	}
+
+	sourceContent, err := os.ReadFile(clawboxPath)
+	if err != nil {
+		t.Fatalf("read source clawbox: %v", err)
+	}
+	exportedContent, err := os.ReadFile(exportPath)
+	if err != nil {
+		t.Fatalf("read exported clawbox: %v", err)
+	}
+	if !bytes.Equal(sourceContent, exportedContent) {
+		t.Fatal("exported clawbox content does not match source clawbox")
+	}
+}
+
+func TestExportFailsForNonClawboxInstance(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--no-wait", "--openclaw-model-primary", "openai/gpt-5", "--openclaw-openai-api-key", "test-key"}); err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+	id := parseClawIDFromRunOutput(out.String())
+	if id == "" {
+		t.Fatalf("failed to parse CLAWID from run output: %s", out.String())
+	}
+
+	err := application.Run([]string{"export", id, filepath.Join(t.TempDir(), "not-clawbox.clawbox")})
+	if err == nil {
+		t.Fatal("expected export to fail for non-clawbox-backed instance")
+	}
+	if !strings.Contains(err.Error(), "not clawbox-backed") {
+		t.Fatalf("unexpected export error: %v", err)
+	}
+}
+
+func TestExportFailsWhenInstanceLockBusy(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+	workspace := t.TempDir()
+	clawboxPath := writeTestClawboxFile(t, workspace, "demo-openclaw.clawbox", "demo-openclaw", "ubuntu:24.04")
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--openclaw-openai-api-key", "test-key", "--openclaw-gateway-token", "test-gateway-token"}); err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+	id := parseClawIDFromRunOutput(out.String())
+	if id == "" {
+		t.Fatalf("failed to parse CLAWID from run output: %s", out.String())
+	}
+
+	mountManager, err := application.mountManager()
+	if err != nil {
+		t.Fatalf("mount manager: %v", err)
+	}
+
+	lockReady := make(chan struct{})
+	lockDone := make(chan error, 1)
+	releaseLock := make(chan struct{})
+	go func() {
+		lockDone <- mountManager.WithInstanceLock(id, func() error {
+			close(lockReady)
+			<-releaseLock
+			return nil
+		})
+	}()
+
+	select {
+	case <-lockReady:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for lock holder")
+	}
+
+	err = application.Run([]string{"export", id, filepath.Join(t.TempDir(), "busy.clawbox")})
+	if !errors.Is(err, mount.ErrBusy) {
+		t.Fatalf("expected mount.ErrBusy, got %v", err)
+	}
+
+	close(releaseLock)
+	select {
+	case lockErr := <-lockDone:
+		if lockErr != nil {
+			t.Fatalf("lock holder failed: %v", lockErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting lock holder to exit")
+	}
+}
+
 func TestRunRequiresImage(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()

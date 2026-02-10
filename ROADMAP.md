@@ -23,18 +23,21 @@
 - ✅ **M1 已完成**：`internal/clawbox` 规格解析/校验（含 `CLAWID` 计算）
   - `internal/clawbox/spec.go`
   - `internal/clawbox/spec_test.go`
-- ✅ **M2 基础已完成**：`internal/mount` 单锁模型基础设施
+- ✅ **M2 已完成**：`internal/mount` 单锁模型已接入 `run/rm` 关键路径（含并发测试）
   - `internal/mount/manager.go`
   - `internal/mount/flock_locker.go`
   - `internal/mount/manager_test.go`
+  - `internal/app/app.go`
+  - `internal/app/app_test.go`
+- ✅ **M3 已完成**：支持 `run <file.clawbox>` 与 `run .`（唯一文件自动发现）
 - ✅ Go 版本基线已升级到 `go 1.24.x`
-- 🟡 **下一步重点**：把 `internal/mount` 接入 `run/rm/export/checkpoint/restore` 的真实流程
+- 🟡 **下一步重点**：开始 `export/checkpoint/restore` 的锁保护流程与最小闭环
 
 ---
 
 ## 2) 里程碑拆分（更新版）
 
-## M2 — Mount lifecycle 接入 CLI（进行中）
+## M2 — Mount lifecycle 接入 CLI（已完成）
 
 **目标**：把 RFC-005 的单锁模型接入现有命令路径。
 
@@ -53,7 +56,7 @@
 
 ---
 
-## M3 — `run <file.clawbox>` 端到端
+## M3 — `run <file.clawbox>` 端到端（已完成）
 
 **目标**：从 `.clawbox` 文件直接启动。
 
@@ -184,4 +187,4 @@
 
 ## 5) 下一步建议（立即执行）
 
-建议先做 **M2 剩余部分**：把 `internal/mount.Manager` 接入 `run/rm` 实际路径，并补一条并发集成测试（同 `CLAWID` 双 `run` 一成一败）。
+建议开始 **M5 第一段**：先落地 `export` 命令的最小实现（锁保护 + 基础导出路径 + 回归测试），再扩展到 `checkpoint/restore`。
