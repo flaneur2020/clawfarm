@@ -3,16 +3,21 @@ package app
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -160,9 +165,43 @@ type runTarget struct {
 	ImageRef                string
 	ClawID                  string
 	MountSource             string
+	SpecJSONMode            bool
+	SkipMount               bool
+	SpecBaseImageURL        string
+	SpecBaseImageSHA256     string
+	SpecLayerArtifacts      []runArtifact
+	SpecProvisionCommands   []string
 	OpenClawModelPrimary    string
 	OpenClawGatewayAuthMode string
+	OpenClawRequiredEnv     []string
 	IsClawbox               bool
+}
+
+type runArtifact struct {
+	Label  string
+	URL    string
+	SHA256 string
+}
+
+type runSpecJSONEnvelope struct {
+	Name      string          `json:"name,omitempty"`
+	Spec      runSpecJSONBody `json:"spec"`
+	Provision []string        `json:"provision,omitempty"`
+}
+
+type runSpecJSONBody struct {
+	Name      string                `json:"name,omitempty"`
+	BaseImage clawbox.BaseImage     `json:"base_image"`
+	Layers    []clawbox.Layer       `json:"layers,omitempty"`
+	OpenClaw  clawbox.OpenClawSpec  `json:"openclaw"`
+	Provision []string              `json:"provision,omitempty"`
+}
+
+type preparedRunTarget struct {
+	ImageMeta         images.Metadata
+	MountSource       string
+	LayerPaths        []string
+	ProvisionCommands []string
 }
 
 func (a *App) resolveRunTarget(input string) (runTarget, error) {
@@ -173,6 +212,40 @@ func (a *App) resolveRunTarget(input string) (runTarget, error) {
 	clawboxPath, err := resolveClawboxPath(input)
 	if err != nil {
 		return runTarget{}, err
+	}
+
+	body, err := os.ReadFile(clawboxPath)
+	if err != nil {
+		return runTarget{}, err
+	}
+
+	trimmed := strings.TrimSpace(string(body))
+	if strings.HasPrefix(trimmed, "{") {
+		header, headerErr := clawbox.ParseHeaderJSON(body)
+		if headerErr == nil {
+			clawID, clawIDErr := header.ClawID(clawboxPath)
+			if clawIDErr != nil {
+				return runTarget{}, fmt.Errorf("compute CLAWID for %s: %w", clawboxPath, clawIDErr)
+			}
+
+			return runTarget{
+				Input:                   input,
+				ImageRef:                strings.TrimSpace(header.Spec.BaseImage.Ref),
+				ClawID:                  clawID,
+				MountSource:             clawboxPath,
+				OpenClawModelPrimary:    strings.TrimSpace(header.Spec.OpenClaw.ModelPrimary),
+				OpenClawGatewayAuthMode: strings.TrimSpace(header.Spec.OpenClaw.GatewayAuthMode),
+				OpenClawRequiredEnv:     append([]string(nil), header.Spec.OpenClaw.RequiredEnv...),
+				IsClawbox:               true,
+			}, nil
+		}
+
+		target, specErr := resolveRunTargetFromSpecJSON(input, clawboxPath, body)
+		if specErr == nil {
+			return target, nil
+		}
+
+		return runTarget{}, fmt.Errorf("parse clawbox %s: %v; spec-json parse: %w", clawboxPath, headerErr, specErr)
 	}
 
 	header, err := clawbox.LoadHeaderJSON(clawboxPath)
@@ -193,10 +266,510 @@ func (a *App) resolveRunTarget(input string) (runTarget, error) {
 		ImageRef:                strings.TrimSpace(header.Spec.BaseImage.Ref),
 		ClawID:                  clawID,
 		MountSource:             clawboxPath,
+		SkipMount:               false,
 		OpenClawModelPrimary:    strings.TrimSpace(header.Spec.OpenClaw.ModelPrimary),
 		OpenClawGatewayAuthMode: strings.TrimSpace(header.Spec.OpenClaw.GatewayAuthMode),
+		OpenClawRequiredEnv:     append([]string(nil), header.Spec.OpenClaw.RequiredEnv...),
 		IsClawbox:               true,
 	}, nil
+}
+
+func resolveRunTargetFromSpecJSON(input string, clawboxPath string, body []byte) (runTarget, error) {
+	var envelope runSpecJSONEnvelope
+	if decodeErr := decodeJSONStrict(body, &envelope); decodeErr == nil && strings.TrimSpace(envelope.Spec.BaseImage.Ref) != "" {
+		provision := append([]string(nil), envelope.Provision...)
+		provision = append(provision, envelope.Spec.Provision...)
+		return buildRunTargetFromSpecJSON(input, clawboxPath, envelope.Name, envelope.Spec, provision)
+	}
+
+	var direct runSpecJSONBody
+	if decodeErr := decodeJSONStrict(body, &direct); decodeErr == nil {
+		if strings.TrimSpace(direct.BaseImage.Ref) == "" {
+			return runTarget{}, errors.New("spec-json missing base_image.ref")
+		}
+		return buildRunTargetFromSpecJSON(input, clawboxPath, direct.Name, direct, direct.Provision)
+	}
+
+	return runTarget{}, errors.New("expected JSON clawbox header or JSON clawbox spec")
+}
+
+func buildRunTargetFromSpecJSON(input string, clawboxPath string, name string, spec runSpecJSONBody, provision []string) (runTarget, error) {
+	runtimeSpec := clawbox.RuntimeSpec{
+		BaseImage: spec.BaseImage,
+		Layers:    append([]clawbox.Layer(nil), spec.Layers...),
+		OpenClaw:  spec.OpenClaw,
+	}
+	resolvedName := resolveSpecJSONName(name, clawboxPath)
+	if err := validateRunSpecJSON(resolvedName, runtimeSpec); err != nil {
+		return runTarget{}, fmt.Errorf("invalid JSON clawbox spec: %w", err)
+	}
+
+	clawID, err := clawbox.ComputeClawID(clawboxPath, resolvedName)
+	if err != nil {
+		return runTarget{}, fmt.Errorf("compute CLAWID for %s: %w", clawboxPath, err)
+	}
+
+	layerArtifacts := make([]runArtifact, 0, len(spec.Layers))
+	for index, layer := range spec.Layers {
+		layerArtifacts = append(layerArtifacts, runArtifact{
+			Label:  fmt.Sprintf("layer-%d", index+1),
+			URL:    strings.TrimSpace(layer.URL),
+			SHA256: strings.TrimSpace(layer.SHA256),
+		})
+	}
+
+	return runTarget{
+		Input:                   input,
+		ImageRef:                strings.TrimSpace(spec.BaseImage.Ref),
+		ClawID:                  clawID,
+		SpecJSONMode:            true,
+		SkipMount:               true,
+		SpecBaseImageURL:        strings.TrimSpace(spec.BaseImage.URL),
+		SpecBaseImageSHA256:     strings.TrimSpace(spec.BaseImage.SHA256),
+		SpecLayerArtifacts:      layerArtifacts,
+		SpecProvisionCommands:   normalizeProvisionCommands(provision),
+		OpenClawModelPrimary:    strings.TrimSpace(spec.OpenClaw.ModelPrimary),
+		OpenClawGatewayAuthMode: strings.TrimSpace(spec.OpenClaw.GatewayAuthMode),
+		OpenClawRequiredEnv:     append([]string(nil), spec.OpenClaw.RequiredEnv...),
+		IsClawbox:               false,
+	}, nil
+}
+
+func decodeJSONStrict(data []byte, target interface{}) error {
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(target)
+}
+
+func resolveSpecJSONName(name string, path string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed != "" {
+		return strings.ToLower(trimmed)
+	}
+
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	base = strings.ToLower(base)
+	base = regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(base, "-")
+	base = strings.Trim(base, "-")
+	if len(base) < 3 {
+		return "clawbox-spec"
+	}
+	if len(base) > 63 {
+		base = base[:63]
+	}
+	if base[0] < 'a' || base[0] > 'z' {
+		base = "claw" + base
+		if len(base) > 63 {
+			base = base[:63]
+		}
+	}
+	return base
+}
+
+func validateRunSpecJSON(name string, spec clawbox.RuntimeSpec) error {
+	header := clawbox.Header{
+		SchemaVersion: clawbox.SchemaVersionV1,
+		Name:          name,
+		CreatedAtUTC:  time.Now().UTC(),
+		Payload: clawbox.Payload{
+			FSType: "squashfs",
+			Offset: 4096,
+			Size:   1,
+			SHA256: strings.Repeat("0", 64),
+		},
+		Spec: spec,
+	}
+	return header.Validate()
+}
+
+func normalizeProvisionCommands(commands []string) []string {
+	result := make([]string, 0, len(commands))
+	for _, command := range commands {
+		trimmed := strings.TrimSpace(command)
+		if trimmed == "" {
+			continue
+		}
+		result = append(result, trimmed)
+	}
+	return result
+}
+
+func (a *App) prepareRunTarget(ctx context.Context, manager *images.Manager, target runTarget) (preparedRunTarget, error) {
+	if !target.SpecJSONMode {
+		imageMeta, err := manager.Resolve(target.ImageRef)
+		if err != nil {
+			return preparedRunTarget{}, err
+		}
+
+		mountSource := imageMeta.RuntimeDisk
+		if target.MountSource != "" {
+			mountSource = target.MountSource
+		}
+
+		return preparedRunTarget{
+			ImageMeta:   imageMeta,
+			MountSource: mountSource,
+		}, nil
+	}
+
+	cacheRoot, err := config.CacheDir()
+	if err != nil {
+		return preparedRunTarget{}, err
+	}
+	specImageRoot := filepath.Join(cacheRoot, "images", "clawbox")
+	if err := ensureDir(specImageRoot); err != nil {
+		return preparedRunTarget{}, err
+	}
+
+	baseArtifact := runArtifact{
+		Label:  "base",
+		URL:    strings.TrimSpace(target.SpecBaseImageURL),
+		SHA256: strings.TrimSpace(target.SpecBaseImageSHA256),
+	}
+	basePath, err := ensureSpecArtifact(ctx, specImageRoot, baseArtifact, a.out)
+	if err != nil {
+		return preparedRunTarget{}, err
+	}
+
+	layerPaths := make([]string, 0, len(target.SpecLayerArtifacts))
+	for _, layer := range target.SpecLayerArtifacts {
+		layerPath, layerErr := ensureSpecArtifact(ctx, specImageRoot, layer, a.out)
+		if layerErr != nil {
+			return preparedRunTarget{}, layerErr
+		}
+		layerPaths = append(layerPaths, layerPath)
+	}
+
+	imageMeta := images.Metadata{
+		Ref:         target.ImageRef,
+		Arch:        detectImageArch(target.ImageRef),
+		RuntimeDisk: basePath,
+		Ready:       true,
+		DiskFormat:  detectDiskFormatForPath(basePath),
+	}
+
+	now := time.Now().UTC()
+	imageMeta.FetchedAtUTC = now
+	imageMeta.UpdatedAtUTC = now
+
+	return preparedRunTarget{
+		ImageMeta:         imageMeta,
+		LayerPaths:        layerPaths,
+		ProvisionCommands: append([]string(nil), target.SpecProvisionCommands...),
+	}, nil
+}
+
+func ensureSpecArtifact(ctx context.Context, root string, artifact runArtifact, out io.Writer) (string, error) {
+	label := strings.TrimSpace(artifact.Label)
+	if label == "" {
+		label = "artifact"
+	}
+
+	rawURL := strings.TrimSpace(artifact.URL)
+	if rawURL == "" {
+		return "", fmt.Errorf("%s.url is required", label)
+	}
+	if _, err := url.ParseRequestURI(rawURL); err != nil {
+		return "", fmt.Errorf("invalid %s.url %q: %w", label, rawURL, err)
+	}
+
+	expectedSHA := strings.ToLower(strings.TrimSpace(artifact.SHA256))
+	if matched, _ := regexp.MatchString(`^[a-f0-9]{64}$`, expectedSHA); !matched {
+		return "", fmt.Errorf("invalid %s.sha256 %q: expected lowercase 64-char hex", label, artifact.SHA256)
+	}
+
+	artifactPath := filepath.Join(root, specArtifactFileName(label, rawURL, expectedSHA))
+	if fileExistsAndNonEmpty(artifactPath) {
+		if err := verifyFileSHA256(artifactPath, expectedSHA); err == nil {
+			if out != nil {
+				fmt.Fprintf(out, "using cached %s %s\n", label, artifactPath)
+			}
+			return artifactPath, nil
+		}
+		_ = os.Remove(artifactPath)
+	}
+
+	if err := downloadFileWithProgress(ctx, rawURL, artifactPath, out, label); err != nil {
+		return "", fmt.Errorf("download %s: %w", label, err)
+	}
+	if err := verifyFileSHA256(artifactPath, expectedSHA); err != nil {
+		_ = os.Remove(artifactPath)
+		return "", err
+	}
+
+	return artifactPath, nil
+}
+
+func specArtifactFileName(label string, rawURL string, sha string) string {
+	safeLabel := strings.ToLower(strings.TrimSpace(label))
+	safeLabel = regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(safeLabel, "-")
+	safeLabel = strings.Trim(safeLabel, "-")
+	if safeLabel == "" {
+		safeLabel = "artifact"
+	}
+
+	ext := ".img"
+	if parsedURL, err := url.Parse(rawURL); err == nil {
+		if candidate := strings.ToLower(strings.TrimSpace(filepath.Ext(parsedURL.Path))); candidate != "" {
+			ext = candidate
+		}
+	}
+
+	if len(sha) > 16 {
+		sha = sha[:16]
+	}
+
+	return fmt.Sprintf("%s-%s%s", safeLabel, sha, ext)
+}
+
+func downloadFileWithProgress(ctx context.Context, rawURL string, destination string, out io.Writer, label string) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("request failed with status %s", response.Status)
+	}
+
+	tempPath := destination + ".tmp"
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return err
+	}
+
+	file, err := os.Create(tempPath)
+	if err != nil {
+		return err
+	}
+
+	cleanup := func() {
+		file.Close()
+		_ = os.Remove(tempPath)
+	}
+
+	if out == nil {
+		if _, err := io.Copy(file, response.Body); err != nil {
+			cleanup()
+			return err
+		}
+	} else {
+		buffer := make([]byte, 1024*1024)
+		total := response.ContentLength
+		var downloaded int64
+		lastRender := time.Time{}
+		render := func(force bool) {
+			if !force && !lastRender.IsZero() && time.Since(lastRender) < 120*time.Millisecond {
+				return
+			}
+			lastRender = time.Now()
+			renderDownloadProgress(out, label, downloaded, total)
+		}
+
+		for {
+			readBytes, readErr := response.Body.Read(buffer)
+			if readBytes > 0 {
+				writtenBytes, writeErr := file.Write(buffer[:readBytes])
+				if writeErr != nil {
+					cleanup()
+					return writeErr
+				}
+				if writtenBytes != readBytes {
+					cleanup()
+					return io.ErrShortWrite
+				}
+				downloaded += int64(readBytes)
+				render(false)
+			}
+
+			if readErr == io.EOF {
+				render(true)
+				fmt.Fprintln(out)
+				break
+			}
+			if readErr != nil {
+				cleanup()
+				return readErr
+			}
+		}
+	}
+
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+
+	if err := os.Rename(tempPath, destination); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+
+	return nil
+}
+
+func renderDownloadProgress(out io.Writer, label string, downloaded int64, total int64) {
+	if total > 0 {
+		percent := float64(downloaded) / float64(total) * 100
+		if percent > 100 {
+			percent = 100
+		}
+		barWidth := 28
+		filled := int(float64(downloaded) / float64(total) * float64(barWidth))
+		if filled > barWidth {
+			filled = barWidth
+		}
+		bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+		fmt.Fprintf(out, "\r%-8s [%s] %5.1f%% %s/%s", label, bar, percent, humanBytes(downloaded), humanBytes(total))
+		return
+	}
+	fmt.Fprintf(out, "\r%-8s downloaded %s", label, humanBytes(downloaded))
+}
+
+func humanBytes(value int64) string {
+	if value < 1024 {
+		return fmt.Sprintf("%dB", value)
+	}
+	units := []string{"KB", "MB", "GB", "TB"}
+	size := float64(value)
+	for _, unit := range units {
+		size /= 1024
+		if size < 1024 {
+			return fmt.Sprintf("%.1f%s", size, unit)
+		}
+	}
+	return fmt.Sprintf("%.1fPB", size/1024)
+}
+
+func verifyFileSHA256(path string, expected string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return err
+	}
+
+	actual := hex.EncodeToString(hasher.Sum(nil))
+	if !strings.EqualFold(actual, expected) {
+		return fmt.Errorf("sha256 mismatch for %s: expected %s got %s", path, expected, actual)
+	}
+	return nil
+}
+
+func fileExistsAndNonEmpty(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Size() > 0
+}
+
+func detectImageArch(ref string) string {
+	if parsed, err := images.ParseUbuntuRef(strings.TrimSpace(ref)); err == nil {
+		if parsed.Arch != "" {
+			return parsed.Arch
+		}
+	}
+
+	if runtime.GOARCH == "arm64" {
+		return "arm64"
+	}
+	return "amd64"
+}
+
+func detectDiskFormatForPath(imagePath string) string {
+	if qemuImgPath, err := exec.LookPath("qemu-img"); err == nil {
+		if format, detectErr := detectDiskFormatWithQEMU(qemuImgPath, imagePath); detectErr == nil {
+			return format
+		}
+	}
+	if format, err := detectDiskFormatByMagic(imagePath); err == nil {
+		return format
+	}
+	return "unknown"
+}
+
+func detectDiskFormatWithQEMU(qemuBinary string, imagePath string) (string, error) {
+	command := exec.Command(qemuBinary, "info", "--output=json", imagePath)
+	output, err := command.Output()
+	if err != nil {
+		return "", err
+	}
+
+	var payload struct {
+		Format string `json:"format"`
+	}
+	if err := json.Unmarshal(output, &payload); err != nil {
+		return "", err
+	}
+	if payload.Format == "" {
+		return "", errors.New("empty format")
+	}
+	return payload.Format, nil
+}
+
+func detectDiskFormatByMagic(imagePath string) (string, error) {
+	file, err := os.Open(imagePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(file, header); err != nil {
+		return "", err
+	}
+
+	if string(header) == "QFI\xfb" {
+		return "qcow2", nil
+	}
+	return "raw", nil
+}
+
+func (a *App) runProvisionCommands(ctx context.Context, instanceDir string, baseImagePath string, instanceImagePath string, layerPaths []string, commands []string) error {
+	if len(commands) == 0 {
+		return nil
+	}
+
+	env := append([]string{}, os.Environ()...)
+	env = append(env,
+		"VCLAW_BASE_IMAGE="+baseImagePath,
+		"VCLAW_INSTANCE_IMAGE="+instanceImagePath,
+		"VCLAW_LAYER_COUNT="+strconv.Itoa(len(layerPaths)),
+	)
+	for index, path := range layerPaths {
+		env = append(env, fmt.Sprintf("VCLAW_LAYER_%d=%s", index+1, path))
+	}
+
+	for index, command := range commands {
+		trimmed := strings.TrimSpace(command)
+		if trimmed == "" {
+			continue
+		}
+
+		fmt.Fprintf(a.out, "provision[%d/%d]: %s\n", index+1, len(commands), trimmed)
+		proc := exec.CommandContext(ctx, "sh", "-lc", trimmed)
+		proc.Dir = instanceDir
+		proc.Env = env
+		output, err := proc.CombinedOutput()
+		if err != nil {
+			message := strings.TrimSpace(string(output))
+			if message == "" {
+				message = err.Error()
+			}
+			return fmt.Errorf("provision command %d failed: %s", index+1, message)
+		}
+	}
+
+	return nil
 }
 
 func isClawboxRunInput(input string) bool {
@@ -416,15 +989,19 @@ func (a *App) runRun(args []string) error {
 	}
 
 	ref := runTarget.ImageRef
-	imageMeta, err := manager.Resolve(ref)
+	preparedTarget, err := a.prepareRunTarget(context.Background(), manager, runTarget)
 	if err != nil {
-		if errors.Is(err, images.ErrImageNotFetched) {
+		if !runTarget.SpecJSONMode && errors.Is(err, images.ErrImageNotFetched) {
 			return fmt.Errorf("image %s is not ready, run `vclaw image fetch %s` first", ref, ref)
 		}
 		return err
 	}
+	imageMeta := preparedTarget.ImageMeta
+	if imageMeta.Arch == "" {
+		imageMeta.Arch = detectImageArch(ref)
+	}
 
-	openClawConfig, err = a.preflightOpenClawInputs(openClawConfig, openClawEnv)
+	openClawConfig, err = a.preflightOpenClawInputs(openClawConfig, openClawEnv, runTarget.OpenClawRequiredEnv)
 	if err != nil {
 		return err
 	}
@@ -453,14 +1030,14 @@ func (a *App) runRun(args []string) error {
 	instanceDir := filepath.Join(instancesRoot, id)
 	statePath := filepath.Join(instanceDir, "state")
 	instanceImagePath := filepath.Join(instanceDir, "instance.img")
-	mountSource := imageMeta.RuntimeDisk
-	if runTarget.MountSource != "" {
-		mountSource = runTarget.MountSource
+	mountSource := preparedTarget.MountSource
+	if mountSource == "" {
+		mountSource = imageMeta.RuntimeDisk
 	}
 
 	var startResult vm.StartResult
 	var instance state.Instance
-	err = mountManager.WithInstanceLock(id, func() error {
+		err = mountManager.WithInstanceLock(id, func() error {
 		existing, loadErr := store.Load(id)
 		if loadErr != nil && !errors.Is(loadErr, state.ErrNotFound) {
 			return loadErr
@@ -469,19 +1046,28 @@ func (a *App) runRun(args []string) error {
 			return mount.ErrBusy
 		}
 
-		if err := ensureDir(statePath); err != nil {
-			return err
-		}
-		if err := copyFile(imageMeta.RuntimeDisk, instanceImagePath); err != nil {
-			return err
-		}
-		if err := mountManager.AcquireWhileLocked(context.Background(), mount.AcquireRequest{
-			ClawID:     id,
-			SourcePath: mountSource,
-			InstanceID: id,
-		}); err != nil {
-			return err
-		}
+			if err := ensureDir(statePath); err != nil {
+				return err
+			}
+			if err := copyFile(imageMeta.RuntimeDisk, instanceImagePath); err != nil {
+				return err
+			}
+
+			acquireRequest := mount.AcquireRequest{
+				ClawID:     id,
+				InstanceID: id,
+			}
+			if !runTarget.SkipMount {
+				acquireRequest.SourcePath = mountSource
+			}
+			if err := mountManager.AcquireWhileLocked(context.Background(), acquireRequest); err != nil {
+				return err
+			}
+
+			if err := a.runProvisionCommands(context.Background(), instanceDir, imageMeta.RuntimeDisk, instanceImagePath, preparedTarget.LayerPaths, preparedTarget.ProvisionCommands); err != nil {
+				_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+				return err
+			}
 
 		startResult, err = a.backend.Start(context.Background(), vm.StartSpec{
 			InstanceID:          id,
@@ -499,21 +1085,21 @@ func (a *App) runRun(args []string) error {
 			OpenClawConfig:      openClawConfig,
 			OpenClawEnvironment: openClawEnv,
 		})
-		if err != nil {
-			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: true})
-			return err
-		}
+			if err != nil {
+				_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+				return err
+			}
 		if err := mountManager.AcquireWhileLocked(context.Background(), mount.AcquireRequest{
 			ClawID:     id,
 			InstanceID: id,
 			PID:        startResult.PID,
 		}); err != nil {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
-			defer cancel()
-			_ = a.backend.Stop(stopCtx, startResult.PID)
-			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: true})
-			return err
-		}
+				stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+				defer cancel()
+				_ = a.backend.Stop(stopCtx, startResult.PID)
+				_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+				return err
+			}
 
 		now := time.Now().UTC()
 		instance = state.Instance{
@@ -538,13 +1124,13 @@ func (a *App) runRun(args []string) error {
 		if noWait {
 			instance.Status = "running"
 		}
-		if err := store.Save(instance); err != nil {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
-			defer cancel()
-			_ = a.backend.Stop(stopCtx, startResult.PID)
-			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: true})
-			return err
-		}
+			if err := store.Save(instance); err != nil {
+				stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+				defer cancel()
+				_ = a.backend.Stop(stopCtx, startResult.PID)
+				_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+				return err
+			}
 		return nil
 	})
 	if err != nil {
@@ -1334,7 +1920,7 @@ type openClawRuntimeRequirements struct {
 	GatewayAuthMode string
 }
 
-func (a *App) preflightOpenClawInputs(openClawConfig string, openClawEnv map[string]string) (string, error) {
+func (a *App) preflightOpenClawInputs(openClawConfig string, openClawEnv map[string]string, requiredEnvKeys []string) (string, error) {
 	requirements, err := parseOpenClawRuntimeRequirements(openClawConfig)
 	if err != nil {
 		return "", err
@@ -1408,6 +1994,23 @@ func (a *App) preflightOpenClawInputs(openClawConfig string, openClawEnv map[str
 		}
 	default:
 		return "", fmt.Errorf("invalid gateway.auth.mode %q in OpenClaw config: expected token, password, or none", requirements.GatewayAuthMode)
+	}
+
+	requiredEnvKeys = normalizeRequiredEnvKeys(requiredEnvKeys)
+	for _, envKey := range requiredEnvKeys {
+		if strings.TrimSpace(openClawEnv[envKey]) != "" {
+			continue
+		}
+		flagHint := requiredFlagForEnvKey(envKey)
+		value, resolveErr := a.resolveRequiredInput(reader, canPrompt, promptFile,
+			requiredOpenClawEnvLabel(envKey),
+			flagHint,
+			envKey,
+			isSecretOpenClawEnvKey(envKey))
+		if resolveErr != nil {
+			return "", resolveErr
+		}
+		openClawEnv[envKey] = value
 	}
 
 	whatsAppRequired := []struct {
@@ -1640,6 +2243,46 @@ func providerEnvRequirementForModel(modelPrimary string) (string, string, error)
 		return "", "", nil
 	default:
 		return "", "", fmt.Errorf("unsupported model provider %q in --openclaw-model-primary %q; supported providers: openai, anthropic, gemini, grok, xai, openrouter, zai, ollama, lmstudio", parts[0], modelPrimary)
+	}
+}
+
+func normalizeRequiredEnvKeys(keys []string) []string {
+	seen := map[string]struct{}{}
+	normalized := make([]string, 0, len(keys))
+	for _, key := range keys {
+		trimmed := strings.ToUpper(strings.TrimSpace(key))
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		normalized = append(normalized, trimmed)
+	}
+	return normalized
+}
+
+func requiredOpenClawEnvLabel(envKey string) string {
+	switch strings.ToUpper(strings.TrimSpace(envKey)) {
+	case "OPENCLAW_GATEWAY_TOKEN":
+		return "OpenClaw gateway token"
+	case "OPENCLAW_GATEWAY_PASSWORD":
+		return "OpenClaw gateway password"
+	case "OPENAI_API_KEY":
+		return "OpenAI API key"
+	case "ANTHROPIC_API_KEY":
+		return "Anthropic API key"
+	case "GOOGLE_GENERATIVE_AI_API_KEY":
+		return "Google Generative AI API key"
+	case "XAI_API_KEY":
+		return "xAI API key"
+	case "OPENROUTER_API_KEY":
+		return "OpenRouter API key"
+	case "ZAI_API_KEY":
+		return "Z.AI API key"
+	default:
+		return fmt.Sprintf("OpenClaw env %s", envKey)
 	}
 }
 

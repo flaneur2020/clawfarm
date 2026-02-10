@@ -3,10 +3,13 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -376,7 +379,7 @@ func TestRunClawboxExplicitOpenClawFlagsOverrideHeaderDefaults(t *testing.T) {
 	var errOut bytes.Buffer
 	application := NewWithBackend(&out, &errOut, backend)
 
-	err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--openclaw-model-primary", "anthropic/claude-3-5-sonnet-latest", "--openclaw-anthropic-api-key", "anthropic-key", "--openclaw-gateway-auth-mode", "none"})
+	err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--openclaw-model-primary", "anthropic/claude-3-5-sonnet-latest", "--openclaw-anthropic-api-key", "anthropic-key", "--openclaw-openai-api-key", "openai-required-by-spec", "--openclaw-gateway-auth-mode", "none"})
 	if err != nil {
 		t.Fatalf("run command failed: %v", err)
 	}
@@ -454,6 +457,77 @@ func TestConcurrentRunSameClawboxReturnsBusy(t *testing.T) {
 	}
 }
 
+func TestRunClawboxRequiredEnvFailsFastWhenMissing(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+	workspace := t.TempDir()
+	clawboxPath := writeTestClawboxFile(t, workspace, "demo-openclaw.clawbox", "demo-openclaw", "ubuntu:24.04")
+	mutateTestClawboxFile(t, clawboxPath, func(header *clawbox.Header) {
+		header.Spec.OpenClaw.GatewayAuthMode = "none"
+		header.Spec.OpenClaw.RequiredEnv = []string{"CUSTOM_REQUIRED_TOKEN"}
+	})
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--openclaw-openai-api-key", "test-key"})
+	if err == nil {
+		t.Fatal("expected missing required env error")
+	}
+	if !strings.Contains(err.Error(), "CUSTOM_REQUIRED_TOKEN") {
+		t.Fatalf("unexpected error for missing required env: %v", err)
+	}
+	if backend.nextPID != 4000 {
+		t.Fatalf("vm should not start before required env preflight")
+	}
+}
+
+func TestRunClawboxRequiredEnvCanBeProvidedByOpenClawEnv(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+	workspace := t.TempDir()
+	clawboxPath := writeTestClawboxFile(t, workspace, "demo-openclaw.clawbox", "demo-openclaw", "ubuntu:24.04")
+	mutateTestClawboxFile(t, clawboxPath, func(header *clawbox.Header) {
+		header.Spec.OpenClaw.GatewayAuthMode = "none"
+		header.Spec.OpenClaw.RequiredEnv = []string{"CUSTOM_REQUIRED_TOKEN"}
+	})
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--openclaw-openai-api-key", "test-key", "--openclaw-env", "CUSTOM_REQUIRED_TOKEN=custom-value"})
+	if err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+	if backend.lastSpec.OpenClawEnvironment["CUSTOM_REQUIRED_TOKEN"] != "custom-value" {
+		t.Fatalf("missing required env propagated to backend")
+	}
+}
+
 func TestRunDotFailsWhenMultipleClawboxFilesExist(t *testing.T) {
 	workdir := t.TempDir()
 	writeTestClawboxFile(t, workdir, "a.clawbox", "demo-openclaw-a", "ubuntu:24.04")
@@ -479,6 +553,237 @@ func TestRunDotFailsWhenMultipleClawboxFilesExist(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "multiple .clawbox files") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunJSONSpecClawboxDownloadsAndRunsWithoutMount(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	basePayload := []byte("json-spec-base-image")
+	baseSHA := sha256Hex(basePayload)
+	layerPayload := []byte("json-spec-layer")
+	layerSHA := sha256Hex(layerPayload)
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/base.img":
+			_, _ = writer.Write(basePayload)
+		case "/layer.qcow2":
+			_, _ = writer.Write(layerPayload)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	specPath := filepath.Join(workspace, "demo-json.clawbox")
+	specContent := `{
+  "name": "demo-json",
+  "spec": {
+    "base_image": {
+      "ref": "ubuntu:24.04",
+      "url": "` + server.URL + `/base.img",
+      "sha256": "` + baseSHA + `"
+    },
+    "layers": [
+      {
+        "ref": "layer-1",
+        "url": "` + server.URL + `/layer.qcow2",
+        "sha256": "` + layerSHA + `"
+      }
+    ],
+    "openclaw": {
+      "install_root": "/claw",
+      "model_primary": "openai/gpt-5",
+      "gateway_auth_mode": "none",
+      "required_env": ["OPENAI_API_KEY"]
+    }
+  },
+  "provision": [
+    "echo provisioned > provisioned.txt"
+  ]
+}`
+	if err := os.WriteFile(specPath, []byte(specContent), 0o644); err != nil {
+		t.Fatalf("write json spec clawbox: %v", err)
+	}
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", specPath, "--workspace=" + workspace, "--no-wait", "--openclaw-openai-api-key", "test-key"}); err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+
+	id := parseClawIDFromRunOutput(out.String())
+	if id == "" {
+		t.Fatalf("failed to parse CLAWID from run output: %s", out.String())
+	}
+
+	instanceDir := filepath.Join(data, "instances", id)
+	provisionedPath := filepath.Join(instanceDir, "provisioned.txt")
+	if _, err := os.Stat(provisionedPath); err != nil {
+		t.Fatalf("expected provision output file %s: %v", provisionedPath, err)
+	}
+
+	mountStatePath := filepath.Join(data, "claws", id, "state.json")
+	mountState := readMountStateFile(t, mountStatePath)
+	if mountState.SourcePath != "" {
+		t.Fatalf("json spec run should not set mount source, got %q", mountState.SourcePath)
+	}
+
+	imageCacheDir := filepath.Join(cache, "images", "clawbox")
+	entries, err := os.ReadDir(imageCacheDir)
+	if err != nil {
+		t.Fatalf("read spec image cache dir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 cached artifacts (base+layer), got %d", len(entries))
+	}
+}
+
+func TestRunJSONSpecClawboxUsesCachedArtifactsWithoutRedownload(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	basePayload := []byte("json-spec-cached-base")
+	baseSHA := sha256Hex(basePayload)
+
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestCount++
+		_, _ = writer.Write(basePayload)
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	specPath := filepath.Join(workspace, "cached-json.clawbox")
+	specContent := `{
+  "name": "cached-json",
+  "spec": {
+    "base_image": {
+      "ref": "ubuntu:24.04",
+      "url": "` + server.URL + `/base.img",
+      "sha256": "` + baseSHA + `"
+    },
+    "openclaw": {
+      "install_root": "/claw",
+      "model_primary": "openai/gpt-5",
+      "gateway_auth_mode": "none",
+      "required_env": ["OPENAI_API_KEY"]
+    }
+  }
+}`
+	if err := os.WriteFile(specPath, []byte(specContent), 0o644); err != nil {
+		t.Fatalf("write json spec clawbox: %v", err)
+	}
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", specPath, "--workspace=" + workspace, "--no-wait", "--openclaw-openai-api-key", "test-key"}); err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("expected first run to download once, got %d requests", requestCount)
+	}
+
+	firstID := parseClawIDFromRunOutput(out.String())
+	if firstID == "" {
+		t.Fatalf("failed to parse first CLAWID from run output: %s", out.String())
+	}
+
+	out.Reset()
+	if err := application.Run([]string{"rm", firstID}); err != nil {
+		t.Fatalf("rm first instance failed: %v", err)
+	}
+
+	out.Reset()
+	if err := application.Run([]string{"run", specPath, "--workspace=" + workspace, "--no-wait", "--openclaw-openai-api-key", "test-key"}); err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("expected second run to reuse cache without download, got %d requests", requestCount)
+	}
+	if !strings.Contains(out.String(), "using cached base") {
+		t.Fatalf("expected cached marker in output, got: %s", out.String())
+	}
+}
+
+func TestRunJSONSpecClawboxFailsOnSHA256Mismatch(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte("wrong-content"))
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	specPath := filepath.Join(workspace, "sha-mismatch.clawbox")
+	specContent := `{
+  "name": "sha-mismatch",
+  "spec": {
+    "base_image": {
+      "ref": "ubuntu:24.04",
+      "url": "` + server.URL + `/base.img",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    "openclaw": {
+      "install_root": "/claw",
+      "model_primary": "openai/gpt-5",
+      "gateway_auth_mode": "none",
+      "required_env": ["OPENAI_API_KEY"]
+    }
+  }
+}`
+	if err := os.WriteFile(specPath, []byte(specContent), 0o644); err != nil {
+		t.Fatalf("write json spec clawbox: %v", err)
+	}
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	err := application.Run([]string{"run", specPath, "--workspace=" + workspace, "--no-wait", "--openclaw-openai-api-key", "test-key"})
+	if err == nil {
+		t.Fatal("expected sha mismatch error")
+	}
+	if !strings.Contains(err.Error(), "sha256 mismatch") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if backend.nextPID != 4000 {
+		t.Fatalf("vm should not start when sha mismatches")
 	}
 }
 
@@ -1378,6 +1683,19 @@ func readMountStateFile(t *testing.T, path string) mountStateFile {
 	return state
 }
 
+func mutateTestClawboxFile(t *testing.T, path string, mutate func(*clawbox.Header)) {
+	t.Helper()
+
+	header, err := clawbox.LoadHeaderJSON(path)
+	if err != nil {
+		t.Fatalf("load clawbox file %s: %v", path, err)
+	}
+	mutate(&header)
+	if err := clawbox.SaveHeaderJSON(path, header); err != nil {
+		t.Fatalf("write clawbox file %s: %v", path, err)
+	}
+}
+
 func writeTestClawboxFile(t *testing.T, dir string, fileName string, name string, baseImageRef string) string {
 	t.Helper()
 
@@ -1438,4 +1756,9 @@ func seedFetchedImage(t *testing.T, cacheRoot string) {
 	if err := os.WriteFile(filepath.Join(imageDir, "image.json"), []byte(metadata), 0o644); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}
+}
+
+func sha256Hex(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
 }
