@@ -533,6 +533,100 @@ func TestExportCopiesClawboxSource(t *testing.T) {
 	}
 }
 
+func TestExportBlocksPossibleSecretsByDefault(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+	workspace := t.TempDir()
+	clawboxPath := writeTestClawboxFile(t, workspace, "demo-openclaw.clawbox", "demo-openclaw", "ubuntu:24.04")
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--openclaw-openai-api-key", "test-key", "--openclaw-gateway-token", "test-gateway-token"}); err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+	id := parseClawIDFromRunOutput(out.String())
+	if id == "" {
+		t.Fatalf("failed to parse CLAWID from run output: %s", out.String())
+	}
+
+	if err := os.WriteFile(clawboxPath, []byte("{\"OPENAI_API_KEY\":\"sk-secret-value-1234567890123456\"}\n"), 0o644); err != nil {
+		t.Fatalf("inject possible secret into source clawbox: %v", err)
+	}
+
+	exportPath := filepath.Join(t.TempDir(), "blocked.clawbox")
+	err := application.Run([]string{"export", id, exportPath})
+	if err == nil {
+		t.Fatal("expected export to be blocked by secret scan")
+	}
+	if !strings.Contains(err.Error(), "export blocked: detected possible secrets") {
+		t.Fatalf("unexpected export error: %v", err)
+	}
+	if _, statErr := os.Stat(exportPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no exported artifact after blocked export")
+	}
+}
+
+func TestExportAllowsPossibleSecretsWithFlag(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+	workspace := t.TempDir()
+	clawboxPath := writeTestClawboxFile(t, workspace, "demo-openclaw.clawbox", "demo-openclaw", "ubuntu:24.04")
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--openclaw-openai-api-key", "test-key", "--openclaw-gateway-token", "test-gateway-token"}); err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+	id := parseClawIDFromRunOutput(out.String())
+	if id == "" {
+		t.Fatalf("failed to parse CLAWID from run output: %s", out.String())
+	}
+
+	if err := os.WriteFile(clawboxPath, []byte("{\"OPENAI_API_KEY\":\"sk-secret-value-1234567890123456\"}\n"), 0o644); err != nil {
+		t.Fatalf("inject possible secret into source clawbox: %v", err)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	exportPath := filepath.Join(t.TempDir(), "allowed.clawbox")
+	err := application.Run([]string{"export", id, exportPath, "--allow-secrets"})
+	if err != nil {
+		t.Fatalf("expected export success with --allow-secrets, got %v", err)
+	}
+	if !strings.Contains(errOut.String(), "warning: exporting with possible secrets") {
+		t.Fatalf("expected warning output when using --allow-secrets, got: %s", errOut.String())
+	}
+	if _, statErr := os.Stat(exportPath); statErr != nil {
+		t.Fatalf("expected exported artifact with --allow-secrets: %v", statErr)
+	}
+}
+
 func TestExportFailsForNonClawboxInstance(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()

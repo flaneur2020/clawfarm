@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -34,6 +36,16 @@ const (
 	defaultReadyTimeoutSecs = 900
 	unhealthyGracePeriod    = 30 * time.Second
 )
+
+var exportSecretScanPatterns = []struct {
+	label string
+	re    *regexp.Regexp
+}{
+	{label: "openai_sk_token", re: regexp.MustCompile(`(?i)\bsk-[a-z0-9_-]{16,}\b`)},
+	{label: "github_pat", re: regexp.MustCompile(`\bghp_[A-Za-z0-9]{20,}\b`)},
+	{label: "slack_token", re: regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`)},
+	{label: "api_key_assignment", re: regexp.MustCompile(`(?i)["']?(api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password)["']?\s*[:=]\s*["'][^"'\s]{8,}["']?`)},
+}
 
 type App struct {
 	out     io.Writer
@@ -798,11 +810,27 @@ func (a *App) runRemove(args []string) error {
 }
 
 func (a *App) runExport(args []string) error {
-	if len(args) != 2 {
-		return errors.New("usage: vclaw export <clawid> <output.clawbox>")
+	allowSecrets := false
+	positionals := make([]string, 0, len(args))
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		switch trimmed {
+		case "--allow-secrets":
+			allowSecrets = true
+			continue
+		case "":
+			continue
+		}
+		if strings.HasPrefix(trimmed, "--") {
+			return fmt.Errorf("unknown export flag %q", trimmed)
+		}
+		positionals = append(positionals, trimmed)
 	}
-	id := strings.TrimSpace(args[0])
-	outputPath := strings.TrimSpace(args[1])
+	if len(positionals) != 2 {
+		return errors.New("usage: vclaw export <clawid> <output.clawbox> [--allow-secrets]")
+	}
+	id := positionals[0]
+	outputPath := positionals[1]
 	if outputPath == "" {
 		return errors.New("output path is required")
 	}
@@ -849,6 +877,17 @@ func (a *App) runExport(args []string) error {
 		}
 		if absSourcePath == absOutputPath {
 			return errors.New("output path must be different from source clawbox path")
+		}
+
+		findings, scanErr := scanPotentialSecretsFromFile(absSourcePath)
+		if scanErr != nil {
+			return scanErr
+		}
+		if len(findings) > 0 && !allowSecrets {
+			return fmt.Errorf("export blocked: detected possible secrets (%s); use --allow-secrets to override", strings.Join(findings, ", "))
+		}
+		if len(findings) > 0 && allowSecrets {
+			fmt.Fprintf(a.errOut, "warning: exporting with possible secrets due to --allow-secrets (%s)\n", strings.Join(findings, ", "))
 		}
 
 		return copyFile(absSourcePath, absOutputPath)
@@ -1007,6 +1046,29 @@ func (a *App) runRestore(args []string) error {
 	return nil
 }
 
+func scanPotentialSecretsFromFile(path string) ([]string, error) {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return scanPotentialSecrets(string(payload)), nil
+}
+
+func scanPotentialSecrets(payload string) []string {
+	findingsSet := map[string]struct{}{}
+	for _, pattern := range exportSecretScanPatterns {
+		if pattern.re.FindStringIndex(payload) != nil {
+			findingsSet[pattern.label] = struct{}{}
+		}
+	}
+	findings := make([]string, 0, len(findingsSet))
+	for label := range findingsSet {
+		findings = append(findings, label)
+	}
+	sort.Strings(findings)
+	return findings
+}
+
 func validateCheckpointName(name string) error {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
@@ -1095,7 +1157,7 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.out, "  vclaw suspend <clawid>")
 	fmt.Fprintln(a.out, "  vclaw resume <clawid>")
 	fmt.Fprintln(a.out, "  vclaw rm <clawid>")
-	fmt.Fprintln(a.out, "  vclaw export <clawid> <output.clawbox>")
+	fmt.Fprintln(a.out, "  vclaw export <clawid> <output.clawbox> [--allow-secrets]")
 	fmt.Fprintln(a.out, "  vclaw checkpoint <clawid> --name <name>")
 	fmt.Fprintln(a.out, "  vclaw restore <clawid> <checkpoint>")
 	fmt.Fprintln(a.out, "")

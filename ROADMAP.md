@@ -31,7 +31,7 @@
   - `internal/app/app_test.go`
 - ✅ **M3 已完成**：支持 `run <file.clawbox>` 与 `run .`（唯一文件自动发现）
 - ✅ Go 版本基线已升级到 `go 1.24.x`
-- 🟡 **M5 已开始**：`export/checkpoint/restore` 的锁保护基线已落地，下一步补齐真实 `.clawbox` 打包与脱敏扫描
+- 🟡 **M5 进行中**：`export/checkpoint/restore` 锁保护已落地，`export` 已支持默认脱敏扫描（可 `--allow-secrets` 旁路），下一步补齐真实 `.clawbox` 打包
 
 ---
 
@@ -105,7 +105,7 @@
 - `checkpoint <CLAWID> --name <name>`；
 - `restore <CLAWID> <checkpoint>`；
 - 三者均在锁保护下执行；
-- `export` 支持脱敏扫描，后续可扩展 `--squash`。
+- `export` 支持脱敏扫描（默认阻断，可 `--allow-secrets` 旁路），后续可扩展 `--squash`。
 
 **验收**
 
