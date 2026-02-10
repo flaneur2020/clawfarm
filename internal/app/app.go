@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/yazhou/krunclaw/internal/clawbox"
 	"github.com/yazhou/krunclaw/internal/config"
 	"github.com/yazhou/krunclaw/internal/images"
 	"github.com/yazhou/krunclaw/internal/mount"
@@ -136,6 +137,96 @@ func (a *App) runImage(args []string) error {
 	}
 }
 
+type runTarget struct {
+	Input       string
+	ImageRef    string
+	ClawID      string
+	MountSource string
+	IsClawbox   bool
+}
+
+func (a *App) resolveRunTarget(input string) (runTarget, error) {
+	if !isClawboxRunInput(input) {
+		return runTarget{Input: input, ImageRef: input}, nil
+	}
+
+	clawboxPath, err := resolveClawboxPath(input)
+	if err != nil {
+		return runTarget{}, err
+	}
+
+	header, err := clawbox.LoadHeaderJSON(clawboxPath)
+	if err != nil {
+		return runTarget{}, fmt.Errorf("load clawbox %s: %w", clawboxPath, err)
+	}
+	if strings.TrimSpace(header.Spec.BaseImage.Ref) == "" {
+		return runTarget{}, fmt.Errorf("clawbox %s missing spec.base_image.ref", clawboxPath)
+	}
+
+	clawID, err := header.ClawID(clawboxPath)
+	if err != nil {
+		return runTarget{}, fmt.Errorf("compute CLAWID for %s: %w", clawboxPath, err)
+	}
+
+	return runTarget{
+		Input:       input,
+		ImageRef:    strings.TrimSpace(header.Spec.BaseImage.Ref),
+		ClawID:      clawID,
+		MountSource: clawboxPath,
+		IsClawbox:   true,
+	}, nil
+}
+
+func isClawboxRunInput(input string) bool {
+	trimmed := strings.TrimSpace(input)
+	return trimmed == "." || strings.HasSuffix(trimmed, ".clawbox")
+}
+
+func resolveClawboxPath(input string) (string, error) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "." {
+		entries, err := os.ReadDir(".")
+		if err != nil {
+			return "", err
+		}
+		matches := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if strings.HasSuffix(name, ".clawbox") {
+				matches = append(matches, name)
+			}
+		}
+		switch len(matches) {
+		case 0:
+			return "", errors.New("current directory does not contain a .clawbox file")
+		case 1:
+			absolutePath, err := filepath.Abs(matches[0])
+			if err != nil {
+				return "", err
+			}
+			return absolutePath, nil
+		default:
+			return "", fmt.Errorf("current directory has multiple .clawbox files, choose one explicitly: %s", strings.Join(matches, ", "))
+		}
+	}
+
+	absolutePath, err := filepath.Abs(trimmed)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(absolutePath)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s is a directory: expected .clawbox file", absolutePath)
+	}
+	return absolutePath, nil
+}
+
 func (a *App) runRun(args []string) error {
 	args = normalizeRunArgs(args)
 
@@ -207,7 +298,7 @@ func (a *App) runRun(args []string) error {
 		return err
 	}
 	if flags.NArg() != 1 {
-		return errors.New("usage: vclaw run <ref> [--workspace=. --port=18789 --publish host:guest] [--openclaw-config path --openclaw-env-file path --openclaw-env KEY=VALUE] [--openclaw-openai-api-key ... --openclaw-discord-token ...]")
+		return errors.New("usage: vclaw run <ref|file.clawbox|.> [--workspace=. --port=18789 --publish host:guest] [--openclaw-config path --openclaw-env-file path --openclaw-env KEY=VALUE] [--openclaw-openai-api-key ... --openclaw-discord-token ...]")
 	}
 	if gatewayPort < 1 || gatewayPort > 65535 {
 		return fmt.Errorf("invalid gateway port %d: expected 1-65535", gatewayPort)
@@ -285,7 +376,12 @@ func (a *App) runRun(args []string) error {
 		return err
 	}
 
-	ref := flags.Arg(0)
+	runTarget, err := a.resolveRunTarget(flags.Arg(0))
+	if err != nil {
+		return err
+	}
+
+	ref := runTarget.ImageRef
 	imageMeta, err := manager.Resolve(ref)
 	if err != nil {
 		if errors.Is(err, images.ErrImageNotFetched) {
@@ -308,9 +404,12 @@ func (a *App) runRun(args []string) error {
 		return err
 	}
 
-	id, err := newClawID()
-	if err != nil {
-		return err
+	id := runTarget.ClawID
+	if id == "" {
+		id, err = newClawID()
+		if err != nil {
+			return err
+		}
 	}
 	instanceDir := filepath.Join(instancesRoot, id)
 	statePath := filepath.Join(instanceDir, "state")
@@ -321,9 +420,13 @@ func (a *App) runRun(args []string) error {
 	if err := copyFile(imageMeta.RuntimeDisk, instanceImagePath); err != nil {
 		return err
 	}
+	mountSource := imageMeta.RuntimeDisk
+	if runTarget.MountSource != "" {
+		mountSource = runTarget.MountSource
+	}
 	if err := mountManager.Acquire(context.Background(), mount.AcquireRequest{
 		ClawID:     id,
-		SourcePath: imageMeta.RuntimeDisk,
+		SourcePath: mountSource,
 		InstanceID: id,
 	}); err != nil {
 		return err
@@ -696,7 +799,7 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.out, "Usage:")
 	fmt.Fprintln(a.out, "  vclaw image ls")
 	fmt.Fprintln(a.out, "  vclaw image fetch <ref>")
-	fmt.Fprintln(a.out, "  vclaw run <ref> [--workspace=. --port=18789 --publish host:guest]")
+	fmt.Fprintln(a.out, "  vclaw run <ref|file.clawbox|.> [--workspace=. --port=18789 --publish host:guest]")
 	fmt.Fprintln(a.out, "             [--openclaw-config path --openclaw-agent-workspace /workspace --openclaw-model-primary openai/gpt-5]")
 	fmt.Fprintln(a.out, "             [--openclaw-gateway-mode local --openclaw-gateway-auth-mode token --openclaw-gateway-token xxx]")
 	fmt.Fprintln(a.out, "             [--openclaw-openai-api-key xxx --openclaw-anthropic-api-key xxx --openclaw-openrouter-api-key xxx]")

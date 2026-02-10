@@ -13,8 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yazhou/krunclaw/internal/clawbox"
 	"github.com/yazhou/krunclaw/internal/vm"
 )
+
+const testClawboxSHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 type fakeBackend struct {
 	nextPID  int
@@ -214,6 +217,126 @@ func TestRunAndRemoveUpdateMountStateFile(t *testing.T) {
 	}
 	if state.InstanceID != "" || state.PID != 0 {
 		t.Fatalf("expected cleared runtime state after rm, got %+v", state)
+	}
+}
+
+func TestRunWithClawboxFileUsesComputedClawID(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+	workspace := t.TempDir()
+	clawboxPath := writeTestClawboxFile(t, workspace, "demo-openclaw.clawbox", "demo-openclaw", "ubuntu:24.04")
+	expectedClawID, err := clawbox.ComputeClawID(clawboxPath, "demo-openclaw")
+	if err != nil {
+		t.Fatalf("compute expected CLAWID: %v", err)
+	}
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--port=65531", "--no-wait", "--openclaw-model-primary", "openai/gpt-5", "--openclaw-openai-api-key", "test-key"}); err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+
+	id := parseClawIDFromRunOutput(out.String())
+	if id != expectedClawID {
+		t.Fatalf("unexpected CLAWID from run: got %q want %q", id, expectedClawID)
+	}
+
+	statePath := filepath.Join(data, "claws", id, "state.json")
+	state := readMountStateFile(t, statePath)
+	if state.SourcePath != clawboxPath {
+		t.Fatalf("unexpected mount source path: got %q want %q", state.SourcePath, clawboxPath)
+	}
+	if !state.Active {
+		t.Fatalf("expected active mount state")
+	}
+
+	out.Reset()
+	if err := application.Run([]string{"rm", id}); err != nil {
+		t.Fatalf("rm failed: %v", err)
+	}
+}
+
+func TestRunDotResolvesUniqueClawboxFile(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+	workdir := t.TempDir()
+	clawboxPath := writeTestClawboxFile(t, workdir, "demo-openclaw.clawbox", "demo-openclaw", "ubuntu:24.04")
+	expectedClawID, err := clawbox.ComputeClawID(clawboxPath, "demo-openclaw")
+	if err != nil {
+		t.Fatalf("compute expected CLAWID: %v", err)
+	}
+
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	defer os.Chdir(originalWD)
+	if err := os.Chdir(workdir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", ".", "--workspace=" + workdir, "--port=65532", "--no-wait", "--openclaw-model-primary", "openai/gpt-5", "--openclaw-openai-api-key", "test-key"}); err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+	id := parseClawIDFromRunOutput(out.String())
+	if id != expectedClawID {
+		t.Fatalf("unexpected CLAWID from run .: got %q want %q", id, expectedClawID)
+	}
+}
+
+func TestRunDotFailsWhenMultipleClawboxFilesExist(t *testing.T) {
+	workdir := t.TempDir()
+	writeTestClawboxFile(t, workdir, "a.clawbox", "demo-openclaw-a", "ubuntu:24.04")
+	writeTestClawboxFile(t, workdir, "b.clawbox", "demo-openclaw-b", "ubuntu:24.04")
+
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	defer os.Chdir(originalWD)
+	if err := os.Chdir(workdir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	err = application.Run([]string{"run", ".", "--workspace=" + workdir, "--no-wait", "--openclaw-model-primary", "openai/gpt-5", "--openclaw-openai-api-key", "test-key"})
+	if err == nil {
+		t.Fatalf("expected error for multiple .clawbox files")
+	}
+	if !strings.Contains(err.Error(), "multiple .clawbox files") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -656,6 +779,52 @@ func readMountStateFile(t *testing.T, path string) mountStateFile {
 		t.Fatalf("decode mount state %s: %v", path, err)
 	}
 	return state
+}
+
+func writeTestClawboxFile(t *testing.T, dir string, fileName string, name string, baseImageRef string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, fileName)
+	header := clawbox.Header{
+		SchemaVersion: clawbox.SchemaVersionV1,
+		Name:          name,
+		CreatedAtUTC:  time.Date(2026, time.February, 10, 0, 0, 0, 0, time.UTC),
+		Payload: clawbox.Payload{
+			FSType: "squashfs",
+			Offset: 4096,
+			Size:   123456,
+			SHA256: testClawboxSHA256,
+		},
+		Spec: clawbox.RuntimeSpec{
+			BaseImage: clawbox.BaseImage{
+				Ref:    baseImageRef,
+				URL:    "https://example.com/base.img",
+				SHA256: testClawboxSHA256,
+			},
+			Layers: []clawbox.Layer{
+				{
+					Ref:    "xfce",
+					URL:    "https://example.com/xfce.qcow2",
+					SHA256: testClawboxSHA256,
+				},
+			},
+			OpenClaw: clawbox.OpenClawSpec{
+				InstallRoot:     "/claw",
+				ModelPrimary:    "openai/gpt-5",
+				GatewayAuthMode: "token",
+				RequiredEnv:     []string{"OPENAI_API_KEY"},
+				OptionalEnv:     []string{"DISCORD_TOKEN"},
+			},
+		},
+	}
+	if err := clawbox.SaveHeaderJSON(path, header); err != nil {
+		t.Fatalf("write clawbox file: %v", err)
+	}
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("abs clawbox path: %v", err)
+	}
+	return absolutePath
 }
 
 func seedFetchedImage(t *testing.T, cacheRoot string) {
