@@ -75,6 +75,10 @@ func (a *App) Run(args []string) error {
 		return a.runRemove(args[1:])
 	case "export":
 		return a.runExport(args[1:])
+	case "checkpoint":
+		return a.runCheckpoint(args[1:])
+	case "restore":
+		return a.runRestore(args[1:])
 	case "help", "-h", "--help":
 		a.printUsage()
 		return nil
@@ -857,6 +861,174 @@ func (a *App) runExport(args []string) error {
 	return nil
 }
 
+func (a *App) runCheckpoint(args []string) error {
+	args = normalizeRunArgs(args)
+
+	flags := flag.NewFlagSet("checkpoint", flag.ContinueOnError)
+	flags.SetOutput(a.errOut)
+
+	checkpointName := ""
+	flags.StringVar(&checkpointName, "name", "", "checkpoint name")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
+		return errors.New("usage: vclaw checkpoint <clawid> --name <name>")
+	}
+	id := strings.TrimSpace(flags.Arg(0))
+	checkpointName = strings.TrimSpace(checkpointName)
+	if err := validateCheckpointName(checkpointName); err != nil {
+		return err
+	}
+
+	store, instancesRoot, err := a.instanceStore()
+	if err != nil {
+		return err
+	}
+	mountManager, err := a.mountManager()
+	if err != nil {
+		return err
+	}
+	checkpointPath := checkpointPathForName(instancesRoot, id, checkpointName)
+
+	err = mountManager.WithInstanceLock(id, func() error {
+		instance, loadErr := store.Load(id)
+		if loadErr != nil {
+			if errors.Is(loadErr, state.ErrNotFound) {
+				return fmt.Errorf("instance %s not found", id)
+			}
+			return loadErr
+		}
+		if strings.TrimSpace(instance.DiskPath) == "" {
+			return fmt.Errorf("instance %s has no disk path", id)
+		}
+
+		suspended := false
+		if instance.PID > 0 && a.backend.IsRunning(instance.PID) {
+			if err := a.backend.Suspend(instance.PID); err != nil {
+				return err
+			}
+			suspended = true
+		}
+
+		if err := copyFile(instance.DiskPath, checkpointPath); err != nil {
+			if suspended {
+				if resumeErr := a.backend.Resume(instance.PID); resumeErr != nil {
+					return fmt.Errorf("%w (and failed to resume VM: %v)", err, resumeErr)
+				}
+			}
+			return err
+		}
+
+		if suspended {
+			if err := a.backend.Resume(instance.PID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(a.out, "checkpointed %s -> %s\n", id, checkpointPath)
+	return nil
+}
+
+func (a *App) runRestore(args []string) error {
+	if len(args) != 2 {
+		return errors.New("usage: vclaw restore <clawid> <checkpoint>")
+	}
+	id := strings.TrimSpace(args[0])
+	checkpointName := strings.TrimSpace(args[1])
+	if err := validateCheckpointName(checkpointName); err != nil {
+		return err
+	}
+
+	store, instancesRoot, err := a.instanceStore()
+	if err != nil {
+		return err
+	}
+	mountManager, err := a.mountManager()
+	if err != nil {
+		return err
+	}
+	checkpointPath := checkpointPathForName(instancesRoot, id, checkpointName)
+
+	err = mountManager.WithInstanceLock(id, func() error {
+		instance, loadErr := store.Load(id)
+		if loadErr != nil {
+			if errors.Is(loadErr, state.ErrNotFound) {
+				return fmt.Errorf("instance %s not found", id)
+			}
+			return loadErr
+		}
+		if strings.TrimSpace(instance.DiskPath) == "" {
+			return fmt.Errorf("instance %s has no disk path", id)
+		}
+		if _, statErr := os.Stat(checkpointPath); statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				return fmt.Errorf("checkpoint %s not found for %s", checkpointName, id)
+			}
+			return statErr
+		}
+
+		suspended := false
+		if instance.PID > 0 && a.backend.IsRunning(instance.PID) {
+			if err := a.backend.Suspend(instance.PID); err != nil {
+				return err
+			}
+			suspended = true
+		}
+
+		if err := copyFile(checkpointPath, instance.DiskPath); err != nil {
+			if suspended {
+				if resumeErr := a.backend.Resume(instance.PID); resumeErr != nil {
+					return fmt.Errorf("%w (and failed to resume VM: %v)", err, resumeErr)
+				}
+			}
+			return err
+		}
+
+		if suspended {
+			if err := a.backend.Resume(instance.PID); err != nil {
+				return err
+			}
+		}
+
+		instance.UpdatedAtUTC = time.Now().UTC()
+		return store.Save(instance)
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(a.out, "restored %s from %s\n", id, checkpointPath)
+	return nil
+}
+
+func validateCheckpointName(name string) error {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return errors.New("checkpoint name is required")
+	}
+	if strings.Contains(trimmed, "/") || strings.Contains(trimmed, "\\") {
+		return fmt.Errorf("invalid checkpoint name %q", name)
+	}
+	if strings.Contains(trimmed, "..") {
+		return fmt.Errorf("invalid checkpoint name %q", name)
+	}
+	return nil
+}
+
+func checkpointPathForName(instancesRoot string, id string, checkpointName string) string {
+	fileName := checkpointName
+	if !strings.HasSuffix(strings.ToLower(fileName), ".qcow2") {
+		fileName += ".qcow2"
+	}
+	return filepath.Join(instancesRoot, id, "checkpoints", fileName)
+}
+
 func (a *App) imageManager() (*images.Manager, error) {
 	cacheDir, err := config.CacheDir()
 	if err != nil {
@@ -924,11 +1096,15 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.out, "  vclaw resume <clawid>")
 	fmt.Fprintln(a.out, "  vclaw rm <clawid>")
 	fmt.Fprintln(a.out, "  vclaw export <clawid> <output.clawbox>")
+	fmt.Fprintln(a.out, "  vclaw checkpoint <clawid> --name <name>")
+	fmt.Fprintln(a.out, "  vclaw restore <clawid> <checkpoint>")
 	fmt.Fprintln(a.out, "")
 	fmt.Fprintln(a.out, "Examples:")
 	fmt.Fprintln(a.out, "  vclaw image fetch ubuntu:24.04")
 	fmt.Fprintln(a.out, "  vclaw run ubuntu:24.04 --workspace=. --publish 8080:80")
 	fmt.Fprintln(a.out, "  vclaw run ubuntu:24.04 --openclaw-openai-api-key $OPENAI_API_KEY --openclaw-discord-token $DISCORD_TOKEN")
+	fmt.Fprintln(a.out, "  vclaw checkpoint claw-1234 --name before-upgrade")
+	fmt.Fprintln(a.out, "  vclaw restore claw-1234 before-upgrade")
 }
 
 type portList struct {

@@ -17,6 +17,7 @@ import (
 
 	"github.com/yazhou/krunclaw/internal/clawbox"
 	"github.com/yazhou/krunclaw/internal/mount"
+	"github.com/yazhou/krunclaw/internal/state"
 	"github.com/yazhou/krunclaw/internal/vm"
 )
 
@@ -632,6 +633,129 @@ func TestExportFailsWhenInstanceLockBusy(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting lock holder to exit")
+	}
+}
+
+func TestCheckpointAndRestoreCopiesDisk(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--no-wait", "--openclaw-model-primary", "openai/gpt-5", "--openclaw-openai-api-key", "test-key"}); err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+	id := parseClawIDFromRunOutput(out.String())
+	if id == "" {
+		t.Fatalf("failed to parse CLAWID from run output: %s", out.String())
+	}
+
+	store := state.NewStore(filepath.Join(data, "instances"))
+	instance, err := store.Load(id)
+	if err != nil {
+		t.Fatalf("load instance: %v", err)
+	}
+	if strings.TrimSpace(instance.DiskPath) == "" {
+		t.Fatalf("instance disk path should not be empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(instance.DiskPath), 0o755); err != nil {
+		t.Fatalf("mkdir instance disk dir: %v", err)
+	}
+	if err := os.WriteFile(instance.DiskPath, []byte("disk-v1"), 0o644); err != nil {
+		t.Fatalf("seed disk: %v", err)
+	}
+
+	out.Reset()
+	if err := application.Run([]string{"checkpoint", id, "--name", "snap-one"}); err != nil {
+		t.Fatalf("checkpoint command failed: %v", err)
+	}
+	checkpointPath := checkpointPathForName(filepath.Join(data, "instances"), id, "snap-one")
+	checkpointContent, err := os.ReadFile(checkpointPath)
+	if err != nil {
+		t.Fatalf("read checkpoint file: %v", err)
+	}
+	if string(checkpointContent) != "disk-v1" {
+		t.Fatalf("unexpected checkpoint content: %q", string(checkpointContent))
+	}
+
+	if err := os.WriteFile(instance.DiskPath, []byte("disk-v2"), 0o644); err != nil {
+		t.Fatalf("overwrite disk: %v", err)
+	}
+
+	out.Reset()
+	if err := application.Run([]string{"restore", id, "snap-one"}); err != nil {
+		t.Fatalf("restore command failed: %v", err)
+	}
+	restoredContent, err := os.ReadFile(instance.DiskPath)
+	if err != nil {
+		t.Fatalf("read restored disk: %v", err)
+	}
+	if string(restoredContent) != "disk-v1" {
+		t.Fatalf("unexpected restored content: %q", string(restoredContent))
+	}
+}
+
+func TestCheckpointRequiresName(t *testing.T) {
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	err := application.Run([]string{"checkpoint", "claw-1234"})
+	if err == nil {
+		t.Fatal("expected checkpoint usage error")
+	}
+	if !strings.Contains(err.Error(), "checkpoint name is required") {
+		t.Fatalf("unexpected checkpoint error: %v", err)
+	}
+}
+
+func TestRestoreFailsWhenCheckpointMissing(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("VCLAW_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_CACHE_DIR")
+	if err := os.Setenv("VCLAW_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("VCLAW_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", "ubuntu:24.04", "--workspace=.", "--no-wait", "--openclaw-model-primary", "openai/gpt-5", "--openclaw-openai-api-key", "test-key"}); err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+	id := parseClawIDFromRunOutput(out.String())
+	if id == "" {
+		t.Fatalf("failed to parse CLAWID from run output: %s", out.String())
+	}
+
+	err := application.Run([]string{"restore", id, "missing-snapshot"})
+	if err == nil {
+		t.Fatal("expected restore failure for missing checkpoint")
+	}
+	if !strings.Contains(err.Error(), "checkpoint missing-snapshot not found") {
+		t.Fatalf("unexpected restore error: %v", err)
 	}
 }
 
