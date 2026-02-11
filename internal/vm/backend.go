@@ -21,6 +21,7 @@ type StartSpec struct {
 	InstanceDir         string
 	ImageArch           string
 	SourceDiskPath      string
+	ClawPath            string
 	WorkspacePath       string
 	StatePath           string
 	GatewayHostPort     int
@@ -31,6 +32,7 @@ type StartSpec struct {
 	OpenClawPackage     string
 	OpenClawConfig      string
 	OpenClawEnvironment map[string]string
+	CloudInitProvision  []string
 }
 
 type StartResult struct {

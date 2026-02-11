@@ -52,6 +52,8 @@ var exportSecretScanPatterns = []struct {
 	{label: "api_key_assignment", re: regexp.MustCompile(`(?i)["']?(api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password)["']?\s*[:=]\s*["'][^"'\s]{8,}["']?`)},
 }
 
+var runNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
+
 type App struct {
 	out     io.Writer
 	errOut  io.Writer
@@ -165,6 +167,9 @@ type runTarget struct {
 	ImageRef                string
 	ClawID                  string
 	MountSource             string
+	ClawboxV2Mode           bool
+	ClawboxPath             string
+	ClawboxV2Spec           *runClawboxSpecV2
 	SpecJSONMode            bool
 	SkipMount               bool
 	SpecBaseImageURL        string
@@ -214,13 +219,17 @@ func (a *App) resolveRunTarget(input string) (runTarget, error) {
 		return runTarget{}, err
 	}
 
-	body, err := os.ReadFile(clawboxPath)
+	startsJSON, err := fileStartsWithJSONObject(clawboxPath)
 	if err != nil {
 		return runTarget{}, err
 	}
 
-	trimmed := strings.TrimSpace(string(body))
-	if strings.HasPrefix(trimmed, "{") {
+	if startsJSON {
+		body, err := os.ReadFile(clawboxPath)
+		if err != nil {
+			return runTarget{}, err
+		}
+
 		header, headerErr := clawbox.ParseHeaderJSON(body)
 		if headerErr == nil {
 			clawID, clawIDErr := header.ClawID(clawboxPath)
@@ -248,30 +257,39 @@ func (a *App) resolveRunTarget(input string) (runTarget, error) {
 		return runTarget{}, fmt.Errorf("parse clawbox %s: %v; spec-json parse: %w", clawboxPath, headerErr, specErr)
 	}
 
-	header, err := clawbox.LoadHeaderJSON(clawboxPath)
-	if err != nil {
-		return runTarget{}, fmt.Errorf("load clawbox %s: %w", clawboxPath, err)
-	}
-	if strings.TrimSpace(header.Spec.BaseImage.Ref) == "" {
-		return runTarget{}, fmt.Errorf("clawbox %s missing spec.base_image.ref", clawboxPath)
+	target, tarErr := resolveRunTargetFromTarClawbox(input, clawboxPath)
+	if tarErr == nil {
+		return target, nil
 	}
 
-	clawID, err := header.ClawID(clawboxPath)
-	if err != nil {
-		return runTarget{}, fmt.Errorf("compute CLAWID for %s: %w", clawboxPath, err)
-	}
+	return runTarget{}, fmt.Errorf("parse clawbox %s as tar.gz: %w", clawboxPath, tarErr)
+}
 
-	return runTarget{
-		Input:                   input,
-		ImageRef:                strings.TrimSpace(header.Spec.BaseImage.Ref),
-		ClawID:                  clawID,
-		MountSource:             clawboxPath,
-		SkipMount:               false,
-		OpenClawModelPrimary:    strings.TrimSpace(header.Spec.OpenClaw.ModelPrimary),
-		OpenClawGatewayAuthMode: strings.TrimSpace(header.Spec.OpenClaw.GatewayAuthMode),
-		OpenClawRequiredEnv:     append([]string(nil), header.Spec.OpenClaw.RequiredEnv...),
-		IsClawbox:               true,
-	}, nil
+func fileStartsWithJSONObject(path string) (bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+
+	buffer := make([]byte, 1)
+	for {
+		count, readErr := file.Read(buffer)
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return false, nil
+			}
+			return false, readErr
+		}
+		if count == 0 {
+			continue
+		}
+		value := buffer[0]
+		if value == ' ' || value == '\n' || value == '\r' || value == '\t' {
+			continue
+		}
+		return value == '{', nil
+	}
 }
 
 func resolveRunTargetFromSpecJSON(input string, clawboxPath string, body []byte) (runTarget, error) {
@@ -395,6 +413,22 @@ func normalizeProvisionCommands(commands []string) []string {
 }
 
 func (a *App) prepareRunTarget(ctx context.Context, manager *images.Manager, target runTarget) (preparedRunTarget, error) {
+	if target.ClawboxV2Mode && target.ClawboxV2Spec != nil {
+		if _, hasRunImage := target.ClawboxV2Spec.runImage(); hasRunImage {
+			now := time.Now().UTC()
+			return preparedRunTarget{
+				ImageMeta: images.Metadata{
+					Ref:          target.ImageRef,
+					Arch:         detectImageArch(target.ImageRef),
+					Ready:        true,
+					DiskFormat:   "qcow2",
+					FetchedAtUTC: now,
+					UpdatedAtUTC: now,
+				},
+			}, nil
+		}
+	}
+
 	if !target.SpecJSONMode {
 		imageMeta, err := manager.Resolve(target.ImageRef)
 		if err != nil {
@@ -657,6 +691,14 @@ func fileExistsAndNonEmpty(path string) bool {
 	return info.Size() > 0
 }
 
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
+}
+
 func detectImageArch(ref string) string {
 	if parsed, err := images.ParseUbuntuRef(strings.TrimSpace(ref)); err == nil {
 		if parsed.Arch != "" {
@@ -819,6 +861,7 @@ func (a *App) runRun(args []string) error {
 	memoryMiB := defaultMemoryMiB
 	readyTimeoutSecs := defaultReadyTimeoutSecs
 	noWait := false
+	runName := ""
 	openClawPackage := "openclaw@latest"
 	openClawConfigPath := ""
 	openClawEnvFile := ""
@@ -849,6 +892,7 @@ func (a *App) runRun(args []string) error {
 	flags.IntVar(&memoryMiB, "memory-mib", defaultMemoryMiB, "memory size in MiB")
 	flags.IntVar(&readyTimeoutSecs, "ready-timeout-secs", defaultReadyTimeoutSecs, "gateway readiness timeout in seconds")
 	flags.BoolVar(&noWait, "no-wait", false, "start and return without waiting for readiness")
+	flags.StringVar(&runName, "name", "", "instance name (used in CLAWID prefix)")
 	flags.StringVar(&openClawPackage, "openclaw-package", "openclaw@latest", "OpenClaw package spec")
 	flags.StringVar(&openClawConfigPath, "openclaw-config", "", "host path to OpenClaw JSON config")
 	flags.StringVar(&openClawEnvFile, "openclaw-env-file", "", "host path to OpenClaw .env file")
@@ -895,6 +939,11 @@ func (a *App) runRun(args []string) error {
 	if openClawGatewayAuthMode != "" && openClawGatewayAuthMode != "token" && openClawGatewayAuthMode != "password" && openClawGatewayAuthMode != "none" {
 		return fmt.Errorf("invalid --openclaw-gateway-auth-mode %q: expected token, password, or none", openClawGatewayAuthMode)
 	}
+	normalizedRunName, err := normalizeRunName(runName)
+	if err != nil {
+		return err
+	}
+	runName = normalizedRunName
 
 	workspacePath, err := filepath.Abs(workspace)
 	if err != nil {
@@ -1007,7 +1056,7 @@ func (a *App) runRun(args []string) error {
 
 	id := runTarget.ClawID
 	if id == "" {
-		id, err = newClawID()
+		id, err = newClawID(runName)
 		if err != nil {
 			return err
 		}
@@ -1034,9 +1083,6 @@ func (a *App) runRun(args []string) error {
 		if err := ensureDir(statePath); err != nil {
 			return err
 		}
-		if err := copyFile(imageMeta.RuntimeDisk, instanceImagePath); err != nil {
-			return err
-		}
 
 		acquireRequest := mount.AcquireRequest{
 			ClawID:     id,
@@ -1049,6 +1095,32 @@ func (a *App) runRun(args []string) error {
 			return err
 		}
 
+		sourceDiskPath := instanceImagePath
+		clawPath := ""
+		cloudInitProvision := []string{}
+
+		if runTarget.ClawboxV2Mode && runTarget.ClawboxV2Spec != nil {
+			clawsRoot := filepath.Join(filepath.Dir(instancesRoot), "claws")
+			importedRunDiskPath, importErr := importRunClawboxV2(runTarget, id, clawsRoot, imageMeta.RuntimeDisk)
+			if importErr != nil {
+				_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+				return importErr
+			}
+			sourceDiskPath = importedRunDiskPath
+
+			clawDir := filepath.Join(clawsRoot, id, "claw")
+			if dirExists(clawDir) {
+				clawPath = clawDir
+			}
+
+			cloudInitProvision = runTarget.ClawboxV2Spec.provisionScripts()
+		} else {
+			if err := copyFile(imageMeta.RuntimeDisk, instanceImagePath); err != nil {
+				_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+				return err
+			}
+		}
+
 		if err := a.runProvisionCommands(context.Background(), instanceDir, imageMeta.RuntimeDisk, instanceImagePath, preparedTarget.LayerPaths, preparedTarget.ProvisionCommands); err != nil {
 			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
 			return err
@@ -1058,7 +1130,8 @@ func (a *App) runRun(args []string) error {
 			InstanceID:          id,
 			InstanceDir:         instanceDir,
 			ImageArch:           imageMeta.Arch,
-			SourceDiskPath:      instanceImagePath,
+			SourceDiskPath:      sourceDiskPath,
+			ClawPath:            clawPath,
 			WorkspacePath:       workspacePath,
 			StatePath:           statePath,
 			GatewayHostPort:     gatewayPort,
@@ -1069,6 +1142,7 @@ func (a *App) runRun(args []string) error {
 			OpenClawPackage:     openClawPackage,
 			OpenClawConfig:      openClawConfig,
 			OpenClawEnvironment: openClawEnv,
+			CloudInitProvision:  cloudInitProvision,
 		})
 		if err != nil {
 			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
@@ -1722,12 +1796,33 @@ func ensureDir(path string) error {
 	return os.MkdirAll(path, 0o755)
 }
 
-func newClawID() (string, error) {
+func newClawID(prefix string) (string, error) {
 	buffer := make([]byte, 4)
 	if _, err := rand.Read(buffer); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("claw-%x", buffer), nil
+	normalizedPrefix, err := normalizeRunName(prefix)
+	if err != nil {
+		return "", err
+	}
+	if normalizedPrefix == "" {
+		return fmt.Sprintf("claw-%x", buffer), nil
+	}
+	return fmt.Sprintf("%s-%x", normalizedPrefix, buffer), nil
+}
+
+func normalizeRunName(raw string) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	if trimmed == "" {
+		return "", nil
+	}
+	trimmed = strings.ReplaceAll(trimmed, "_", "-")
+	trimmed = strings.ReplaceAll(trimmed, " ", "-")
+	trimmed = strings.Trim(trimmed, "-")
+	if !runNamePattern.MatchString(trimmed) {
+		return "", fmt.Errorf("invalid --name %q: expected [a-z0-9-], max length 48, and must start with letter/number", raw)
+	}
+	return trimmed, nil
 }
 
 func (a *App) printUsage() {

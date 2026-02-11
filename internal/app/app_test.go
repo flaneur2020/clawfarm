@@ -1,12 +1,15 @@
 package app
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -784,6 +787,203 @@ func TestRunJSONSpecClawboxFailsOnSHA256Mismatch(t *testing.T) {
 	}
 	if backend.nextPID != 4000 {
 		t.Fatalf("vm should not start when sha mismatches")
+	}
+}
+
+func TestRunTarClawboxImportsRunImageAndClawDir(t *testing.T) {
+	data := t.TempDir()
+	home := t.TempDir()
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatalf("set HOME env: %v", err)
+	}
+	defer os.Unsetenv("HOME")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
+
+	workspace := t.TempDir()
+	baseDisk := []byte("base-disk-content")
+	runDisk := []byte("run-disk-content")
+	baseSHA := sha256Hex(baseDisk)
+	runSHA := sha256Hex(runDisk)
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/base.qcow2":
+			_, _ = writer.Write(baseDisk)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	clawboxPath := filepath.Join(workspace, "demo-v2.clawbox")
+	writeTarClawboxV2(t, clawboxPath, tarClawboxV2Fixture{
+		Name:    "demo-v2",
+		BaseRef: "ubuntu:24.04",
+		BaseURL: server.URL + "/base.qcow2",
+		BaseSHA: baseSHA,
+		RunRef:  "clawbox:///run.qcow2",
+		RunSHA:  runSHA,
+		RunDisk: runDisk,
+		ClawFiles: map[string]string{
+			"claw/SOUL.md": "hello",
+		},
+		RequiredEnv: []string{"OPENAI_API_KEY"},
+		Provision:   []map[string]string{{"name": "setup", "shell": "bash", "script": "echo setup"}},
+	})
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--name", "demo-a", "--openclaw-openai-api-key", "test-key"})
+	if err != nil {
+		t.Fatalf("run command failed: %v", err)
+	}
+
+	id := parseClawIDFromRunOutput(out.String())
+	if id == "" {
+		t.Fatalf("missing CLAWID output: %s", out.String())
+	}
+	if !strings.HasPrefix(id, "demo-a-") {
+		t.Fatalf("expected id prefix demo-a-, got %s", id)
+	}
+
+	clawRoot := filepath.Join(data, "claws", id)
+	runDiskPath := filepath.Join(clawRoot, "run.qcow2")
+	runDiskOnDisk, err := os.ReadFile(runDiskPath)
+	if err != nil {
+		t.Fatalf("read imported run disk: %v", err)
+	}
+	if !bytes.Equal(runDiskOnDisk, runDisk) {
+		t.Fatalf("unexpected run disk content")
+	}
+
+	if _, err := os.Stat(filepath.Join(clawRoot, "claw", "SOUL.md")); err != nil {
+		t.Fatalf("expected extracted claw dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(clawRoot, "clawspec.json")); err != nil {
+		t.Fatalf("expected imported clawspec: %v", err)
+	}
+
+	if backend.lastSpec.SourceDiskPath != runDiskPath {
+		t.Fatalf("unexpected source disk path: got %q want %q", backend.lastSpec.SourceDiskPath, runDiskPath)
+	}
+	if backend.lastSpec.ClawPath != filepath.Join(clawRoot, "claw") {
+		t.Fatalf("unexpected claw path in start spec: %q", backend.lastSpec.ClawPath)
+	}
+	if len(backend.lastSpec.CloudInitProvision) != 1 || backend.lastSpec.CloudInitProvision[0] != "echo setup" {
+		t.Fatalf("unexpected cloud-init provision scripts: %#v", backend.lastSpec.CloudInitProvision)
+	}
+
+	statePath := filepath.Join(data, "claws", id, "state.json")
+	mountState := readMountStateFile(t, statePath)
+	if mountState.SourcePath != "" {
+		t.Fatalf("expected no mount source for v2 tar clawbox, got %q", mountState.SourcePath)
+	}
+	if !mountState.Active {
+		t.Fatalf("expected mount state active=true")
+	}
+}
+
+func TestRunTarClawboxAllowsMultipleInstancesFromSameFile(t *testing.T) {
+	data := t.TempDir()
+	home := t.TempDir()
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatalf("set HOME env: %v", err)
+	}
+	defer os.Unsetenv("HOME")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
+
+	workspace := t.TempDir()
+	baseDisk := []byte("base-for-multi")
+	runDisk := []byte("run-for-multi")
+	baseSHA := sha256Hex(baseDisk)
+	runSHA := sha256Hex(runDisk)
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write(baseDisk)
+	}))
+	defer server.Close()
+
+	clawboxPath := filepath.Join(workspace, "multi-v2.clawbox")
+	writeTarClawboxV2(t, clawboxPath, tarClawboxV2Fixture{
+		Name:        "multi-v2",
+		BaseRef:     "ubuntu:24.04",
+		BaseURL:     server.URL + "/base.qcow2",
+		BaseSHA:     baseSHA,
+		RunRef:      "clawbox:///run.qcow2",
+		RunSHA:      runSHA,
+		RunDisk:     runDisk,
+		RequiredEnv: []string{"OPENAI_API_KEY"},
+	})
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	if err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--name", "multi-a", "--openclaw-openai-api-key", "test-key"}); err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	idA := parseClawIDFromRunOutput(out.String())
+	if idA == "" {
+		t.Fatalf("missing first CLAWID")
+	}
+
+	out.Reset()
+	if err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--name", "multi-b", "--openclaw-openai-api-key", "test-key"}); err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+	idB := parseClawIDFromRunOutput(out.String())
+	if idB == "" {
+		t.Fatalf("missing second CLAWID")
+	}
+
+	if idA == idB {
+		t.Fatalf("expected different CLAWID for two runs from same .clawbox")
+	}
+	if !strings.HasPrefix(idA, "multi-a-") || !strings.HasPrefix(idB, "multi-b-") {
+		t.Fatalf("expected name-prefixed ids, got %q and %q", idA, idB)
+	}
+}
+
+func TestRunTarClawboxFailsWhenMissingSpec(t *testing.T) {
+	data := t.TempDir()
+	home := t.TempDir()
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatalf("set HOME env: %v", err)
+	}
+	defer os.Unsetenv("HOME")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
+
+	workspace := t.TempDir()
+	clawboxPath := filepath.Join(workspace, "broken-v2.clawbox")
+	writeTarClawboxWithoutSpec(t, clawboxPath)
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	err := application.Run([]string{"run", clawboxPath, "--workspace=" + workspace, "--no-wait", "--openclaw-openai-api-key", "test-key"})
+	if err == nil {
+		t.Fatal("expected run to fail when clawspec.json is missing")
+	}
+	if !strings.Contains(err.Error(), "missing clawspec.json") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if backend.nextPID != 4000 {
+		t.Fatalf("vm should not start on invalid tar clawbox")
 	}
 }
 
@@ -1761,4 +1961,152 @@ func seedFetchedImage(t *testing.T, cacheRoot string) {
 func sha256Hex(content []byte) string {
 	sum := sha256.Sum256(content)
 	return hex.EncodeToString(sum[:])
+}
+
+type tarClawboxV2Fixture struct {
+	Name        string
+	BaseRef     string
+	BaseURL     string
+	BaseSHA     string
+	RunRef      string
+	RunSHA      string
+	RunDisk     []byte
+	RequiredEnv []string
+	ClawFiles   map[string]string
+	Provision   []map[string]string
+}
+
+func writeTarClawboxV2(t *testing.T, path string, fixture tarClawboxV2Fixture) {
+	t.Helper()
+
+	if fixture.Name == "" {
+		fixture.Name = "demo"
+	}
+	if fixture.BaseRef == "" {
+		fixture.BaseRef = "ubuntu:24.04"
+	}
+	if fixture.BaseSHA == "" {
+		t.Fatal("BaseSHA is required")
+	}
+	if len(fixture.RequiredEnv) == 0 {
+		fixture.RequiredEnv = []string{"OPENAI_API_KEY"}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir clawbox dir: %v", err)
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create clawbox file: %v", err)
+	}
+	defer file.Close()
+
+	gzWriter := gzip.NewWriter(file)
+	defer gzWriter.Close()
+
+	tarWriter := tar.NewWriter(gzWriter)
+	defer tarWriter.Close()
+
+	images := []map[string]string{
+		{
+			"name":   "base",
+			"ref":    fixture.BaseURL,
+			"sha256": fixture.BaseSHA,
+		},
+	}
+	if fixture.BaseURL == "" {
+		images[0]["ref"] = fixture.BaseRef
+	}
+	if fixture.RunRef != "" {
+		images = append(images, map[string]string{
+			"name":   "run",
+			"ref":    fixture.RunRef,
+			"sha256": fixture.RunSHA,
+		})
+	}
+
+	spec := map[string]interface{}{
+		"schema_version": 2,
+		"name":           fixture.Name,
+		"image":          images,
+		"openclaw": map[string]interface{}{
+			"model_primary":     "openai/gpt-5",
+			"gateway_auth_mode": "none",
+			"required_env":      fixture.RequiredEnv,
+		},
+	}
+	if len(fixture.Provision) > 0 {
+		spec["provision"] = fixture.Provision
+	}
+
+	payload, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal clawspec json: %v", err)
+	}
+	writeTarRegularFile(t, tarWriter, "clawspec.json", payload, 0o644)
+
+	if fixture.RunRef != "" {
+		if len(fixture.RunDisk) == 0 {
+			t.Fatal("RunDisk is required when RunRef is set")
+		}
+		writeTarRegularFile(t, tarWriter, "run.qcow2", fixture.RunDisk, 0o644)
+	}
+
+	for name, content := range fixture.ClawFiles {
+		writeTarRegularFile(t, tarWriter, name, []byte(content), 0o644)
+	}
+
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := gzWriter.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close clawbox file: %v", err)
+	}
+}
+
+func writeTarClawboxWithoutSpec(t *testing.T, path string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir clawbox dir: %v", err)
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create clawbox file: %v", err)
+	}
+	defer file.Close()
+
+	gzWriter := gzip.NewWriter(file)
+	defer gzWriter.Close()
+	tarWriter := tar.NewWriter(gzWriter)
+	defer tarWriter.Close()
+
+	writeTarRegularFile(t, tarWriter, "README.txt", []byte("broken"), 0o644)
+
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := gzWriter.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close clawbox file: %v", err)
+	}
+}
+
+func writeTarRegularFile(t *testing.T, writer *tar.Writer, name string, content []byte, mode int64) {
+	t.Helper()
+	if err := writer.WriteHeader(&tar.Header{
+		Name: name,
+		Mode: mode,
+		Size: int64(len(content)),
+	}); err != nil {
+		t.Fatalf("write tar header for %s: %v", name, err)
+	}
+	if _, err := io.Copy(writer, bytes.NewReader(content)); err != nil {
+		t.Fatalf("write tar body for %s: %v", name, err)
+	}
 }

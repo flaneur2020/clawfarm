@@ -288,6 +288,10 @@ func buildQEMUArgs(
 		"-pidfile", pidFilePath,
 	)
 
+	if strings.TrimSpace(spec.ClawPath) != "" {
+		args = append(args, "-virtfs", fmt.Sprintf("local,path=%s,mount_tag=claw,security_model=none,id=claw", spec.ClawPath))
+	}
+
 	return args, nil
 }
 
@@ -456,6 +460,14 @@ func buildCloudInitUserData(spec StartSpec) string {
 	bootstrapScript := buildBootstrapScript(spec)
 	return fmt.Sprintf(`#cloud-config
 package_update: false
+users:
+  - default
+  - name: claw
+    gecos: Claw User
+    shell: /bin/bash
+    groups: [sudo]
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    lock_passwd: true
 write_files:
   - path: /usr/local/bin/vclaw-bootstrap.sh
     permissions: "0755"
@@ -489,6 +501,7 @@ func buildBootstrapScript(spec StartSpec) string {
 	}
 
 	openClawEnv := renderOpenClawEnvironment(spec.OpenClawEnvironment)
+	provisionScript := renderProvisionScript(spec.CloudInitProvision)
 
 	return fmt.Sprintf(`#!/usr/bin/env bash
 set -euxo pipefail
@@ -499,12 +512,23 @@ modprobe 9pnet_virtio 2>/dev/null || true
 
 mkdir -p /workspace /root/.openclaw /etc/vclaw
 
+if ! id -u claw >/dev/null 2>&1; then
+  useradd -m -s /bin/bash claw
+fi
+usermod -aG sudo claw || true
+install -d -m 0755 -o claw -g claw /claw
+
 if ! mountpoint -q /workspace; then
   mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 workspace /workspace || true
 fi
 if ! mountpoint -q /root/.openclaw; then
   mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 state /root/.openclaw || true
 fi
+if ! mountpoint -q /claw; then
+  mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 claw /claw || true
+fi
+
+chown -R claw:claw /claw || true
 
 cat >/etc/vclaw/openclaw.json <<'CLAWFARM_OPENCLAW_JSON'
 %s
@@ -534,6 +558,8 @@ fi
 exec /usr/bin/python3 -m http.server %d --directory /workspace
 SCRIPT
 chmod +x /usr/local/bin/vclaw-gateway.sh
+
+%s
 
 cat >/etc/systemd/system/vclaw-gateway.service <<'UNIT'
 [Unit]
@@ -568,7 +594,36 @@ if ! command -v openclaw >/dev/null 2>&1; then
     systemctl restart vclaw-gateway.service
   ) >/var/log/vclaw-openclaw-install.log 2>&1 &
 fi
-`, openClawConfig, openClawEnv, spec.GatewayGuestPort, spec.GatewayGuestPort, packageName)
+
+if [[ -x /usr/local/bin/vclaw-provision.sh ]]; then
+  /usr/local/bin/vclaw-provision.sh >/var/log/vclaw-provision.log 2>&1
+fi
+`, openClawConfig, openClawEnv, spec.GatewayGuestPort, spec.GatewayGuestPort, provisionScript, packageName)
+}
+
+func renderProvisionScript(commands []string) string {
+	if len(commands) == 0 {
+		return ""
+	}
+
+	var builder strings.Builder
+	builder.WriteString("cat >/usr/local/bin/vclaw-provision.sh <<'PROVISION'\n")
+	builder.WriteString("#!/usr/bin/env bash\n")
+	builder.WriteString("set -euxo pipefail\n")
+	builder.WriteString("export HOME=/home/claw\n")
+	builder.WriteString("cd /claw\n")
+	for _, command := range commands {
+		trimmed := strings.TrimSpace(command)
+		if trimmed == "" {
+			continue
+		}
+		builder.WriteString(trimmed)
+		builder.WriteString("\n")
+	}
+	builder.WriteString("PROVISION\n")
+	builder.WriteString("chmod +x /usr/local/bin/vclaw-provision.sh\n")
+	builder.WriteString("chown claw:claw /usr/local/bin/vclaw-provision.sh\n")
+	return builder.String()
 }
 
 func renderOpenClawEnvironment(values map[string]string) string {
