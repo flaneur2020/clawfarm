@@ -1,13 +1,13 @@
 # clawfarm
 
-`clawfarm` is a **GUI-first VM sandbox** for AI agents.
+`clawfarm` is a VM sandbox runtime for AI agents, prioritizing guest systems with GUI capabilities.
 
 > ⚠️ Early stage project: interfaces, file formats, and workflows may change quickly.
 
 ## Positioning
 
-- **Goal:** run and manage agent-centric VM sandboxes with a GUI-first product direction.
-- **Non-goal:** become a general-purpose VM manager.
+- **Goal:** run and manage agent-centric VM sandboxes where the guest system itself is GUI-capable.
+- **Non-goal:** become a general-purpose VM manager; `clawfarm` is built with AI agents as first-class users.
 
 ## Usage
 
@@ -19,7 +19,3 @@ make build
 ./clawfarm ps
 ./clawfarm stop <CLAWID>
 ```
-
-## Note
-
-The CLI and workflows are evolving rapidly in this stage.
