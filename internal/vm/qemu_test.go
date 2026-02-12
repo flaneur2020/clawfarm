@@ -39,10 +39,10 @@ func TestBuildCloudInitUserData(t *testing.T) {
 		"#cloud-config",
 		"name: claw",
 		"NOPASSWD:ALL",
-		"/usr/local/bin/vclaw-bootstrap.sh",
+		"/usr/local/bin/clawfarm-bootstrap.sh",
 		"npm install -g openclaw@latest",
 		"openclaw gateway --allow-unconfigured --port 18789",
-		"/usr/local/bin/vclaw-provision.sh",
+		"/usr/local/bin/clawfarm-provision.sh",
 	} {
 		if !strings.Contains(userData, expected) {
 			t.Fatalf("cloud-init user-data missing %q", expected)
@@ -62,13 +62,13 @@ func TestBuildBootstrapScriptWithConfigAndEnv(t *testing.T) {
 	script := buildBootstrapScript(spec)
 
 	for _, expected := range []string{
-		"/etc/vclaw/openclaw.env",
-		"source /etc/vclaw/openclaw.env",
+		"/etc/clawfarm/openclaw.env",
+		"source /etc/clawfarm/openclaw.env",
 		"OPENAI_API_KEY",
 		"OPENCLAW_GATEWAY_TOKEN",
 		"\"gateway\":{\"mode\":\"local\",\"port\":18789}",
 		"mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 claw /claw",
-		"/usr/local/bin/vclaw-provision.sh",
+		"/usr/local/bin/clawfarm-provision.sh",
 		"echo setup",
 	} {
 		if !strings.Contains(script, expected) {

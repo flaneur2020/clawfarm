@@ -469,13 +469,13 @@ users:
     sudo: ["ALL=(ALL) NOPASSWD:ALL"]
     lock_passwd: true
 write_files:
-  - path: /usr/local/bin/vclaw-bootstrap.sh
+  - path: /usr/local/bin/clawfarm-bootstrap.sh
     permissions: "0755"
     owner: root:root
     content: |
 %s
 runcmd:
-  - [ bash, -lc, "/usr/local/bin/vclaw-bootstrap.sh > /var/log/vclaw-bootstrap.log 2>&1" ]
+  - [ bash, -lc, "/usr/local/bin/clawfarm-bootstrap.sh > /var/log/clawfarm-bootstrap.log 2>&1" ]
 `, indentForCloudConfig(bootstrapScript, 6))
 }
 
@@ -510,7 +510,7 @@ modprobe 9p 2>/dev/null || true
 modprobe 9pnet 2>/dev/null || true
 modprobe 9pnet_virtio 2>/dev/null || true
 
-mkdir -p /workspace /root/.openclaw /etc/vclaw
+mkdir -p /workspace /root/.openclaw /etc/clawfarm
 
 if ! id -u claw >/dev/null 2>&1; then
   useradd -m -s /bin/bash claw
@@ -530,24 +530,24 @@ fi
 
 chown -R claw:claw /claw || true
 
-cat >/etc/vclaw/openclaw.json <<'CLAWFARM_OPENCLAW_JSON'
+cat >/etc/clawfarm/openclaw.json <<'CLAWFARM_OPENCLAW_JSON'
 %s
 CLAWFARM_OPENCLAW_JSON
 
-cat >/etc/vclaw/openclaw.env <<'CLAWFARM_OPENCLAW_ENV'
+cat >/etc/clawfarm/openclaw.env <<'CLAWFARM_OPENCLAW_ENV'
 %s
 CLAWFARM_OPENCLAW_ENV
-chmod 0600 /etc/vclaw/openclaw.env
+chmod 0600 /etc/clawfarm/openclaw.env
 
-cat >/usr/local/bin/vclaw-gateway.sh <<'SCRIPT'
+cat >/usr/local/bin/clawfarm-gateway.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 
 export HOME=/root
-export OPENCLAW_CONFIG_PATH=/etc/vclaw/openclaw.json
-if [[ -f /etc/vclaw/openclaw.env ]]; then
+export OPENCLAW_CONFIG_PATH=/etc/clawfarm/openclaw.json
+if [[ -f /etc/clawfarm/openclaw.env ]]; then
   set -a
-  source /etc/vclaw/openclaw.env
+  source /etc/clawfarm/openclaw.env
   set +a
 fi
 
@@ -557,19 +557,19 @@ fi
 
 exec /usr/bin/python3 -m http.server %d --directory /workspace
 SCRIPT
-chmod +x /usr/local/bin/vclaw-gateway.sh
+chmod +x /usr/local/bin/clawfarm-gateway.sh
 
 %s
 
-cat >/etc/systemd/system/vclaw-gateway.service <<'UNIT'
+cat >/etc/systemd/system/clawfarm-gateway.service <<'UNIT'
 [Unit]
-Description=vclaw Gateway Service
+Description=clawfarm Gateway Service
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/vclaw-gateway.sh
+ExecStart=/usr/local/bin/clawfarm-gateway.sh
 Restart=always
 RestartSec=3
 
@@ -578,7 +578,7 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now vclaw-gateway.service
+systemctl enable --now clawfarm-gateway.service
 
 if ! command -v openclaw >/dev/null 2>&1; then
   (
@@ -591,12 +591,12 @@ if ! command -v openclaw >/dev/null 2>&1; then
       apt-get install -y --no-install-recommends nodejs
     fi
     npm install -g %s
-    systemctl restart vclaw-gateway.service
-  ) >/var/log/vclaw-openclaw-install.log 2>&1 &
+    systemctl restart clawfarm-gateway.service
+  ) >/var/log/clawfarm-openclaw-install.log 2>&1 &
 fi
 
-if [[ -x /usr/local/bin/vclaw-provision.sh ]]; then
-  /usr/local/bin/vclaw-provision.sh >/var/log/vclaw-provision.log 2>&1
+if [[ -x /usr/local/bin/clawfarm-provision.sh ]]; then
+  /usr/local/bin/clawfarm-provision.sh >/var/log/clawfarm-provision.log 2>&1
 fi
 `, openClawConfig, openClawEnv, spec.GatewayGuestPort, spec.GatewayGuestPort, provisionScript, packageName)
 }
@@ -607,7 +607,7 @@ func renderProvisionScript(commands []string) string {
 	}
 
 	var builder strings.Builder
-	builder.WriteString("cat >/usr/local/bin/vclaw-provision.sh <<'PROVISION'\n")
+	builder.WriteString("cat >/usr/local/bin/clawfarm-provision.sh <<'PROVISION'\n")
 	builder.WriteString("#!/usr/bin/env bash\n")
 	builder.WriteString("set -euxo pipefail\n")
 	builder.WriteString("export HOME=/home/claw\n")
@@ -621,8 +621,8 @@ func renderProvisionScript(commands []string) string {
 		builder.WriteString("\n")
 	}
 	builder.WriteString("PROVISION\n")
-	builder.WriteString("chmod +x /usr/local/bin/vclaw-provision.sh\n")
-	builder.WriteString("chown claw:claw /usr/local/bin/vclaw-provision.sh\n")
+	builder.WriteString("chmod +x /usr/local/bin/clawfarm-provision.sh\n")
+	builder.WriteString("chown claw:claw /usr/local/bin/clawfarm-provision.sh\n")
 	return builder.String()
 }
 

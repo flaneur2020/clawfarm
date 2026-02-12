@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CLAWFARM_BIN="${CLAWFARM_BIN:-${ROOT_DIR}/vclaw}"
+CLAWFARM_BIN="${CLAWFARM_BIN:-${ROOT_DIR}/clawfarm}"
 INTEGRATION_IMAGE_REF="${INTEGRATION_IMAGE_REF:-ubuntu:24.04}"
 INTEGRATION_GATEWAY_PORT="${INTEGRATION_GATEWAY_PORT:-19289}"
 INTEGRATION_READY_TIMEOUT_SECS="${INTEGRATION_READY_TIMEOUT_SECS:-300}"
@@ -36,7 +36,7 @@ printf 'integration-002 %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >"${WORKDIR}/in
 echo "[002-cache-copy] using binary: ${CLAWFARM_BIN}"
 if [[ ! -x "${CLAWFARM_BIN}" ]]; then
   echo "[002-cache-copy] error: binary not found or not executable: ${CLAWFARM_BIN}" >&2
-  echo "[002-cache-copy] hint: go build -o vclaw ./cmd/vclaw" >&2
+  echo "[002-cache-copy] hint: go build -o clawfarm ./cmd/clawfarm" >&2
   exit 1
 fi
 
@@ -81,7 +81,7 @@ if grep -Eq 'image  \[' "${TEST_TMP}/second-fetch.log"; then
 fi
 
 IMAGE_NAME="$(sanitize_ref "${INTEGRATION_IMAGE_REF}")"
-IMAGE_DIR="${HOME_DIR}/.vclaw/images/${IMAGE_NAME}"
+IMAGE_DIR="${HOME_DIR}/.clawfarm/images/${IMAGE_NAME}"
 SOURCE_DISK="${IMAGE_DIR}/image.img"
 
 if [[ ! -f "${SOURCE_DISK}" ]]; then
@@ -111,10 +111,10 @@ if [[ -z "${CLAWID}" ]]; then
   exit 1
 fi
 
-INSTANCE_IMG="${HOME_DIR}/.vclaw/instances/${CLAWID}/instance.img"
+INSTANCE_IMG="${HOME_DIR}/.clawfarm/instances/${CLAWID}/instance.img"
 if [[ ! -f "${INSTANCE_IMG}" ]]; then
   echo "[002-cache-copy] expected copied instance image at ${INSTANCE_IMG}" >&2
-  ls -la "${HOME_DIR}/.vclaw/instances/${CLAWID}" >&2 || true
+  ls -la "${HOME_DIR}/.clawfarm/instances/${CLAWID}" >&2 || true
   exit 1
 fi
 
@@ -125,5 +125,5 @@ if [[ "${INSTANCE_SIZE}" -lt "${SOURCE_SIZE}" ]]; then
   exit 1
 fi
 
-echo "[002-cache-copy] verified ~/.vclaw image cache and per-instance copy"
+echo "[002-cache-copy] verified ~/.clawfarm image cache and per-instance copy"
 echo "[002-cache-copy] success"

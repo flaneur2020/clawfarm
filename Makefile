@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
 GO ?= go
-CLAWFARM_BIN ?= $(CURDIR)/vclaw
+CLAWFARM_BIN ?= $(CURDIR)/clawfarm
 INTEGRATION_IMAGE_REF ?= ubuntu:24.04
 
 .PHONY: help build test integration integration-001 integration-001-run integration-002 clean
@@ -9,8 +9,8 @@ INTEGRATION_IMAGE_REF ?= ubuntu:24.04
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-build: ## Build vclaw binary
-	$(GO) build -o $(CLAWFARM_BIN) ./cmd/vclaw
+build: ## Build clawfarm binary
+	$(GO) build -o $(CLAWFARM_BIN) ./cmd/clawfarm
 
 test: ## Run Go unit tests
 	$(GO) test ./...

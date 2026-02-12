@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CLAWFARM_BIN="${CLAWFARM_BIN:-${ROOT_DIR}/vclaw}"
+CLAWFARM_BIN="${CLAWFARM_BIN:-${ROOT_DIR}/clawfarm}"
 INTEGRATION_GATEWAY_PORT="${INTEGRATION_GATEWAY_PORT:-18789}"
 INTEGRATION_CANVAS_PORT="${INTEGRATION_CANVAS_PORT:-18793}"
 INTEGRATION_IMAGE_REF="${INTEGRATION_IMAGE_REF:-ubuntu:24.04}"
@@ -14,7 +14,7 @@ TEST_TMP="${ROOT_DIR}/.tmp/integration-001"
 CACHE_DIR="${TEST_TMP}/cache"
 DATA_DIR="${TEST_TMP}/data"
 WORKDIR="${TEST_TMP}/workspace"
-RUN_LOG="${TEST_TMP}/vclaw-run.log"
+RUN_LOG="${TEST_TMP}/clawfarm-run.log"
 
 rm -rf "${TEST_TMP}"
 mkdir -p "${TEST_TMP}" "${CACHE_DIR}" "${DATA_DIR}" "${WORKDIR}"
@@ -23,7 +23,7 @@ printf 'integration-001 %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >"${WORKDIR}/in
 echo "[001-basic] using binary: ${CLAWFARM_BIN}"
 if [[ ! -x "${CLAWFARM_BIN}" ]]; then
   echo "[001-basic] error: binary not found or not executable: ${CLAWFARM_BIN}" >&2
-  echo "[001-basic] hint: go build -o vclaw ./cmd/vclaw" >&2
+  echo "[001-basic] hint: go build -o clawfarm ./cmd/clawfarm" >&2
   exit 1
 fi
 
@@ -41,7 +41,7 @@ if [[ "${INTEGRATION_ENABLE_RUN}" != "1" ]]; then
   exit 0
 fi
 
-echo "[001-basic] starting vclaw run"
+echo "[001-basic] starting clawfarm run"
 set +e
 CLAWFARM_CACHE_DIR="${CACHE_DIR}" CLAWFARM_DATA_DIR="${DATA_DIR}" \
   "${CLAWFARM_BIN}" run "${INTEGRATION_IMAGE_REF}" \

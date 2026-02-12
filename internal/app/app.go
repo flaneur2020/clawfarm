@@ -108,7 +108,7 @@ func (a *App) Run(args []string) error {
 
 func (a *App) runImage(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: vclaw image <ls|fetch>")
+		return errors.New("usage: clawfarm image <ls|fetch>")
 	}
 
 	manager, err := a.imageManager()
@@ -119,7 +119,7 @@ func (a *App) runImage(args []string) error {
 	switch args[0] {
 	case "ls":
 		if len(args) != 1 {
-			return errors.New("usage: vclaw image ls")
+			return errors.New("usage: clawfarm image ls")
 		}
 		items, err := manager.ListAvailable()
 		if err != nil {
@@ -145,7 +145,7 @@ func (a *App) runImage(args []string) error {
 		return tw.Flush()
 	case "fetch":
 		if len(args) != 2 {
-			return errors.New("usage: vclaw image fetch <ref>")
+			return errors.New("usage: clawfarm image fetch <ref>")
 		}
 		ref := args[1]
 		fmt.Fprintf(a.out, "fetching image %s\n", ref)
@@ -922,7 +922,7 @@ func (a *App) runRun(args []string) error {
 		return err
 	}
 	if flags.NArg() != 1 {
-		return errors.New("usage: vclaw run <ref|file.clawbox|.> [--workspace=. --port=18789 --publish host:guest] [--openclaw-config path --openclaw-env-file path --openclaw-env KEY=VALUE] [--openclaw-openai-api-key ... --openclaw-discord-token ...]")
+		return errors.New("usage: clawfarm run <ref|file.clawbox|.> [--workspace=. --port=18789 --publish host:guest] [--openclaw-config path --openclaw-env-file path --openclaw-env KEY=VALUE] [--openclaw-openai-api-key ... --openclaw-discord-token ...]")
 	}
 	if gatewayPort < 1 || gatewayPort > 65535 {
 		return fmt.Errorf("invalid gateway port %d: expected 1-65535", gatewayPort)
@@ -1026,7 +1026,7 @@ func (a *App) runRun(args []string) error {
 	preparedTarget, err := a.prepareRunTarget(context.Background(), manager, runTarget)
 	if err != nil {
 		if !runTarget.SpecJSONMode && errors.Is(err, images.ErrImageNotFetched) {
-			return fmt.Errorf("image %s is not ready, run `vclaw image fetch %s` first", ref, ref)
+			return fmt.Errorf("image %s is not ready, run `clawfarm image fetch %s` first", ref, ref)
 		}
 		return err
 	}
@@ -1241,7 +1241,7 @@ func (a *App) runRun(args []string) error {
 
 func (a *App) runPS(args []string) error {
 	if len(args) != 0 {
-		return errors.New("usage: vclaw ps")
+		return errors.New("usage: clawfarm ps")
 	}
 	store, _, err := a.instanceStore()
 	if err != nil {
@@ -1355,14 +1355,14 @@ func probeGatewayHealth(url string, timeout time.Duration) (bool, string) {
 
 func (a *App) runSuspend(args []string) error {
 	if len(args) != 1 {
-		return errors.New("usage: vclaw suspend <clawid>")
+		return errors.New("usage: clawfarm suspend <clawid>")
 	}
 	return a.updateInstanceStateWithSignal(args[0], "suspended")
 }
 
 func (a *App) runResume(args []string) error {
 	if len(args) != 1 {
-		return errors.New("usage: vclaw resume <clawid>")
+		return errors.New("usage: clawfarm resume <clawid>")
 	}
 	return a.updateInstanceStateWithSignal(args[0], "running")
 }
@@ -1406,7 +1406,7 @@ func (a *App) updateInstanceStateWithSignal(id string, status string) error {
 
 func (a *App) runRemove(args []string) error {
 	if len(args) != 1 {
-		return errors.New("usage: vclaw rm <clawid>")
+		return errors.New("usage: clawfarm rm <clawid>")
 	}
 	store, _, err := a.instanceStore()
 	if err != nil {
@@ -1480,7 +1480,7 @@ func (a *App) runExport(args []string) error {
 		}
 	}
 	if len(positionals) != 2 {
-		return errors.New("usage: vclaw export <clawid> <output.clawbox> [--allow-secrets] [--name <name>]")
+		return errors.New("usage: clawfarm export <clawid> <output.clawbox> [--allow-secrets] [--name <name>]")
 	}
 	id := positionals[0]
 	outputPath := positionals[1]
@@ -1578,7 +1578,7 @@ func (a *App) runCheckpoint(args []string) error {
 		return err
 	}
 	if flags.NArg() != 1 {
-		return errors.New("usage: vclaw checkpoint <clawid> --name <name>")
+		return errors.New("usage: clawfarm checkpoint <clawid> --name <name>")
 	}
 	id := strings.TrimSpace(flags.Arg(0))
 	checkpointName = strings.TrimSpace(checkpointName)
@@ -1642,7 +1642,7 @@ func (a *App) runCheckpoint(args []string) error {
 
 func (a *App) runRestore(args []string) error {
 	if len(args) != 2 {
-		return errors.New("usage: vclaw restore <clawid> <checkpoint>")
+		return errors.New("usage: clawfarm restore <clawid> <checkpoint>")
 	}
 	id := strings.TrimSpace(args[0])
 	checkpointName := strings.TrimSpace(args[1])
@@ -1826,12 +1826,12 @@ func normalizeRunName(raw string) (string, error) {
 }
 
 func (a *App) printUsage() {
-	fmt.Fprintln(a.out, "vclaw - run full OpenClaw inside a lightweight VM")
+	fmt.Fprintln(a.out, "clawfarm - run full OpenClaw inside a lightweight VM")
 	fmt.Fprintln(a.out, "")
 	fmt.Fprintln(a.out, "Usage:")
-	fmt.Fprintln(a.out, "  vclaw image ls")
-	fmt.Fprintln(a.out, "  vclaw image fetch <ref>")
-	fmt.Fprintln(a.out, "  vclaw run <ref|file.clawbox|.> [--workspace=. --port=18789 --publish host:guest]")
+	fmt.Fprintln(a.out, "  clawfarm image ls")
+	fmt.Fprintln(a.out, "  clawfarm image fetch <ref>")
+	fmt.Fprintln(a.out, "  clawfarm run <ref|file.clawbox|.> [--workspace=. --port=18789 --publish host:guest]")
 	fmt.Fprintln(a.out, "             [--openclaw-config path --openclaw-agent-workspace /workspace --openclaw-model-primary openai/gpt-5]")
 	fmt.Fprintln(a.out, "             [--openclaw-gateway-mode local --openclaw-gateway-auth-mode token --openclaw-gateway-token xxx]")
 	fmt.Fprintln(a.out, "             [--openclaw-openai-api-key xxx --openclaw-anthropic-api-key xxx --openclaw-openrouter-api-key xxx]")
@@ -1840,20 +1840,20 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.out, "             [--openclaw-whatsapp-phone-number-id xxx --openclaw-whatsapp-access-token xxx]")
 	fmt.Fprintln(a.out, "             [--openclaw-whatsapp-verify-token xxx --openclaw-whatsapp-app-secret xxx]")
 	fmt.Fprintln(a.out, "             [--openclaw-env-file path --openclaw-env KEY=VALUE]")
-	fmt.Fprintln(a.out, "  vclaw ps")
-	fmt.Fprintln(a.out, "  vclaw suspend <clawid>")
-	fmt.Fprintln(a.out, "  vclaw resume <clawid>")
-	fmt.Fprintln(a.out, "  vclaw rm <clawid>")
-	fmt.Fprintln(a.out, "  vclaw export <clawid> <output.clawbox> [--allow-secrets] [--name <name>]")
-	fmt.Fprintln(a.out, "  vclaw checkpoint <clawid> --name <name>")
-	fmt.Fprintln(a.out, "  vclaw restore <clawid> <checkpoint>")
+	fmt.Fprintln(a.out, "  clawfarm ps")
+	fmt.Fprintln(a.out, "  clawfarm suspend <clawid>")
+	fmt.Fprintln(a.out, "  clawfarm resume <clawid>")
+	fmt.Fprintln(a.out, "  clawfarm rm <clawid>")
+	fmt.Fprintln(a.out, "  clawfarm export <clawid> <output.clawbox> [--allow-secrets] [--name <name>]")
+	fmt.Fprintln(a.out, "  clawfarm checkpoint <clawid> --name <name>")
+	fmt.Fprintln(a.out, "  clawfarm restore <clawid> <checkpoint>")
 	fmt.Fprintln(a.out, "")
 	fmt.Fprintln(a.out, "Examples:")
-	fmt.Fprintln(a.out, "  vclaw image fetch ubuntu:24.04")
-	fmt.Fprintln(a.out, "  vclaw run ubuntu:24.04 --workspace=. --publish 8080:80")
-	fmt.Fprintln(a.out, "  vclaw run ubuntu:24.04 --openclaw-openai-api-key $OPENAI_API_KEY --openclaw-discord-token $DISCORD_TOKEN")
-	fmt.Fprintln(a.out, "  vclaw checkpoint claw-1234 --name before-upgrade")
-	fmt.Fprintln(a.out, "  vclaw restore claw-1234 before-upgrade")
+	fmt.Fprintln(a.out, "  clawfarm image fetch ubuntu:24.04")
+	fmt.Fprintln(a.out, "  clawfarm run ubuntu:24.04 --workspace=. --publish 8080:80")
+	fmt.Fprintln(a.out, "  clawfarm run ubuntu:24.04 --openclaw-openai-api-key $OPENAI_API_KEY --openclaw-discord-token $DISCORD_TOKEN")
+	fmt.Fprintln(a.out, "  clawfarm checkpoint claw-1234 --name before-upgrade")
+	fmt.Fprintln(a.out, "  clawfarm restore claw-1234 before-upgrade")
 }
 
 type portList struct {
