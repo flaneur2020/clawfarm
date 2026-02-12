@@ -1,0 +1,48 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run unit test suite
+        run: go test ./...
+
+  integration-tests:
+    name: Integration Tests (No-VM)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run app integration-style tests
+        run: |
+          go test -count=1 ./internal/app -run 'TestRun(JSONSpecClawboxDownloadsAndRunsWithoutMount|JSONSpecClawboxUsesCachedArtifactsWithoutRedownload|JSONSpecClawboxFailsOnSHA256Mismatch|TarClawboxImportsRunImageAndClawDir|TarClawboxAllowsMultipleInstancesFromSameFile|TarClawboxFailsWhenMissingSpec)$'
+
+      - name: Run VM bootstrap integration-style tests
+        run: |
+          go test -count=1 ./internal/vm -run 'TestBuild(CloudInitUserData|BootstrapScriptWithConfigAndEnv|QEMUArgsIncludesClawVirtfs)$'
