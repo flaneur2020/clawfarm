@@ -14,8 +14,8 @@
 ```bash
 make build
 
-./clawfarm new
-./clawfarm run demo.clawbox --name demo-a
+./clawfarm new # an interactive TUI to guide you for creating a new .clawbox file
+./clawfarm run demo.clawbox --name demo-a # run the .clawbox file
 ./clawfarm ps
 ./clawfarm stop <CLAWID>
 ```

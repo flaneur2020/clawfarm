@@ -1040,7 +1040,7 @@ func (a *App) runRun(args []string) error {
 		return err
 	}
 
-	store, instancesRoot, err := a.instanceStore()
+	store, clawsRoot, err := a.instanceStore()
 	if err != nil {
 		return err
 	}
@@ -1061,7 +1061,7 @@ func (a *App) runRun(args []string) error {
 			return err
 		}
 	}
-	instanceDir := filepath.Join(instancesRoot, id)
+	instanceDir := filepath.Join(clawsRoot, id)
 	statePath := filepath.Join(instanceDir, "state")
 	instanceImagePath := filepath.Join(instanceDir, "instance.img")
 	mountSource := preparedTarget.MountSource
@@ -1100,7 +1100,6 @@ func (a *App) runRun(args []string) error {
 		cloudInitProvision := []string{}
 
 		if runTarget.ClawboxV2Mode && runTarget.ClawboxV2Spec != nil {
-			clawsRoot := filepath.Join(filepath.Dir(instancesRoot), "claws")
 			importedRunDiskPath, importErr := importRunClawboxV2(runTarget, id, clawsRoot, imageMeta.RuntimeDisk)
 			if importErr != nil {
 				_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
@@ -1586,7 +1585,7 @@ func (a *App) runCheckpoint(args []string) error {
 		return err
 	}
 
-	store, instancesRoot, err := a.instanceStore()
+	store, clawsRoot, err := a.instanceStore()
 	if err != nil {
 		return err
 	}
@@ -1594,7 +1593,7 @@ func (a *App) runCheckpoint(args []string) error {
 	if err != nil {
 		return err
 	}
-	checkpointPath := checkpointPathForName(instancesRoot, id, checkpointName)
+	checkpointPath := checkpointPathForName(clawsRoot, id, checkpointName)
 
 	err = mountManager.WithInstanceLock(id, func() error {
 		instance, loadErr := store.Load(id)
@@ -1650,7 +1649,7 @@ func (a *App) runRestore(args []string) error {
 		return err
 	}
 
-	store, instancesRoot, err := a.instanceStore()
+	store, clawsRoot, err := a.instanceStore()
 	if err != nil {
 		return err
 	}
@@ -1658,7 +1657,7 @@ func (a *App) runRestore(args []string) error {
 	if err != nil {
 		return err
 	}
-	checkpointPath := checkpointPathForName(instancesRoot, id, checkpointName)
+	checkpointPath := checkpointPathForName(clawsRoot, id, checkpointName)
 
 	err = mountManager.WithInstanceLock(id, func() error {
 		instance, loadErr := store.Load(id)
@@ -1773,11 +1772,11 @@ func (a *App) instanceStore() (*state.Store, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	instancesRoot := filepath.Join(dataDir, "instances")
-	if err := ensureDir(instancesRoot); err != nil {
+	clawsRoot := filepath.Join(dataDir, "claws")
+	if err := ensureDir(clawsRoot); err != nil {
 		return nil, "", err
 	}
-	return state.NewStore(instancesRoot), instancesRoot, nil
+	return state.NewStore(clawsRoot), clawsRoot, nil
 }
 
 func (a *App) mountManager() (*mount.Manager, error) {

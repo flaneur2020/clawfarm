@@ -245,12 +245,8 @@ func TestRunAndRemoveUpdateMountStateFile(t *testing.T) {
 		t.Fatalf("rm failed: %v", err)
 	}
 
-	state = readMountStateFile(t, statePath)
-	if state.Active {
-		t.Fatalf("expected mount state active=false after rm")
-	}
-	if state.InstanceID != "" || state.PID != 0 {
-		t.Fatalf("expected cleared runtime state after rm, got %+v", state)
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("expected mount state file to be removed after rm, got err=%v", err)
 	}
 }
 
@@ -634,7 +630,7 @@ func TestRunJSONSpecClawboxDownloadsAndRunsWithoutMount(t *testing.T) {
 		t.Fatalf("failed to parse CLAWID from run output: %s", out.String())
 	}
 
-	instanceDir := filepath.Join(data, "instances", id)
+	instanceDir := filepath.Join(data, "claws", id)
 	provisionedPath := filepath.Join(instanceDir, "provisioned.txt")
 	if _, err := os.Stat(provisionedPath); err != nil {
 		t.Fatalf("expected provision output file %s: %v", provisionedPath, err)
@@ -1346,7 +1342,7 @@ func TestCheckpointAndRestoreCopiesDisk(t *testing.T) {
 		t.Fatalf("failed to parse CLAWID from run output: %s", out.String())
 	}
 
-	store := state.NewStore(filepath.Join(data, "instances"))
+	store := state.NewStore(filepath.Join(data, "claws"))
 	instance, err := store.Load(id)
 	if err != nil {
 		t.Fatalf("load instance: %v", err)
@@ -1365,7 +1361,7 @@ func TestCheckpointAndRestoreCopiesDisk(t *testing.T) {
 	if err := application.Run([]string{"checkpoint", id, "--name", "snap-one"}); err != nil {
 		t.Fatalf("checkpoint command failed: %v", err)
 	}
-	checkpointPath := checkpointPathForName(filepath.Join(data, "instances"), id, "snap-one")
+	checkpointPath := checkpointPathForName(filepath.Join(data, "claws"), id, "snap-one")
 	checkpointContent, err := os.ReadFile(checkpointPath)
 	if err != nil {
 		t.Fatalf("read checkpoint file: %v", err)
@@ -1824,7 +1820,7 @@ func TestPSMarksHTTP5xxAsUnhealthy(t *testing.T) {
 	backend.nextPID = 4999
 	backend.running[5000] = true
 
-	instanceStore := filepath.Join(data, "instances")
+	instanceStore := filepath.Join(data, "claws")
 	if err := os.MkdirAll(filepath.Join(instanceStore, "claw-test5xx"), 0o755); err != nil {
 		t.Fatalf("mkdir instance: %v", err)
 	}

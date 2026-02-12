@@ -1,10 +1,10 @@
-# ROADMAP — Clawbox MVP Runtime First（以 RFC-006 为准）
+# ROADMAP — Clawbox MVP Runtime First（以 RFC-007 为准）
 
 ## 0) 约束基线
 
 以以下 RFC 为最高优先级：
 
-- `rfc/006-clawbox-import-export-distribution-first.md`
+- `rfc/007-current-design-consolidated.md`
 
 当前已确认的核心约束：
 
@@ -44,7 +44,7 @@
 - `export` 深化（脱敏策略、打包完善）；
 - `checkpoint/restore` 能力完善；
 - `rm`/回收策略增强；
-- CLI 命名迁移到 `clawfarm` 全量收尾（当前二进制仍为 `vclaw`）；
+- CLI 体验持续收敛到 `clawfarm` 命令集合（含 `new/run/ps/stop`）；
 - GUI first-class 与可视化运维能力。
 
 ---
@@ -87,7 +87,7 @@
 
 ## 3) 下一阶段建议（P0/P1 only）
 
-1. 补齐“mountable clawbox 单文件”真实挂载链路（与 RFC-004 对齐）；
+1. 清理剩余 legacy 路径，保持 import-first runtime 模型唯一；
 2. 完成 tar v2 导入路径收口（run.qcow2/base fallback、`claw/` 挂载）；
 3. 增加失败清理一致性（下载中断、provision 失败、启动失败）；
 4. 增加端到端 smoke：`run -> ps -> rm`（JSON 与 tar v2 都覆盖）。
@@ -99,4 +99,4 @@
 - 每次只推进一个可验收小切片；
 - 代码 + 测试一起提交；
 - 每个 checkpoint 都保持 `go test ./...` 通过；
-- 若 RFC 与实现冲突，以 RFC-006 为准。
+- 若 RFC 与实现冲突，以 RFC-007 为准。

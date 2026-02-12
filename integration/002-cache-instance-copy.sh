@@ -111,10 +111,10 @@ if [[ -z "${CLAWID}" ]]; then
   exit 1
 fi
 
-INSTANCE_IMG="${HOME_DIR}/.clawfarm/instances/${CLAWID}/instance.img"
+INSTANCE_IMG="${HOME_DIR}/.clawfarm/claws/${CLAWID}/instance.img"
 if [[ ! -f "${INSTANCE_IMG}" ]]; then
   echo "[002-cache-copy] expected copied instance image at ${INSTANCE_IMG}" >&2
-  ls -la "${HOME_DIR}/.clawfarm/instances/${CLAWID}" >&2 || true
+  ls -la "${HOME_DIR}/.clawfarm/claws/${CLAWID}" >&2 || true
   exit 1
 fi
 
