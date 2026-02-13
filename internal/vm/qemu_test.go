@@ -167,6 +167,7 @@ func TestBuildBootstrapScriptIncludesVolumeMount(t *testing.T) {
 	for _, expected := range []string{
 		"install -d -m 0755 '/root/.openclaw'",
 		"mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 volume1 '/root/.openclaw'",
+		"touch /var/lib/clawfarm/bootstrap.ready",
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("bootstrap script missing %q", expected)

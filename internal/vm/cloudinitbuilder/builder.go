@@ -270,6 +270,9 @@ fi
 if [[ -x /usr/local/bin/clawfarm-provision.sh ]]; then
   /usr/local/bin/clawfarm-provision.sh >/var/log/clawfarm-provision.log 2>&1
 fi
+
+install -d -m 0755 /var/lib/clawfarm
+touch /var/lib/clawfarm/bootstrap.ready
 `, sshBootstrapScript, volumeMountScript, openClawConfig, openClawEnv, builder.GatewayGuestPort, builder.GatewayGuestPort, provisionScript, packageName)
 }
 

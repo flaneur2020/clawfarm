@@ -40,6 +40,7 @@ const (
 	defaultMemoryMiB        = 4096
 	defaultReadyTimeoutSecs = 900
 	unhealthyGracePeriod    = 30 * time.Second
+	bootstrapReadyMarker    = "/var/lib/clawfarm/bootstrap.ready"
 )
 
 var exportSecretScanPatterns = []struct {
@@ -2748,6 +2749,13 @@ func (a *App) runCommandsViaSSH(clawID string, sshHostPort int, sshPrivateKeyPat
 		return fmt.Errorf("%s: wait for ssh readiness: %w", clawID, err)
 	}
 
+	fmt.Fprintln(a.out, "run: waiting for guest bootstrap readiness")
+	bootstrapReadyCtx, bootstrapReadyCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer bootstrapReadyCancel()
+	if err := waitForGuestBootstrapReady(bootstrapReadyCtx, sshHostPort, sshPrivateKeyPath, bootstrapReadyMarker); err != nil {
+		return fmt.Errorf("%s: wait for guest bootstrap readiness: %w", clawID, err)
+	}
+
 commandLoop:
 	for index, command := range commands {
 		trimmedCommand := strings.TrimSpace(command)
@@ -2812,10 +2820,38 @@ func waitForSSHReady(ctx context.Context, sshHostPort int, sshPrivateKeyPath str
 	}
 }
 
+func waitForGuestBootstrapReady(ctx context.Context, sshHostPort int, sshPrivateKeyPath string, markerPath string) error {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	checkCommand := fmt.Sprintf("test -f %s", shellSingleQuote(markerPath))
+	var lastErr error
+	for {
+		if err := runSSHProbeWithCommand(sshHostPort, sshPrivateKeyPath, checkCommand); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		select {
+		case <-ctx.Done():
+			if lastErr == nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("%w (last error: %v)", ctx.Err(), lastErr)
+		case <-ticker.C:
+		}
+	}
+}
+
 func runSSHProbe(sshHostPort int, sshPrivateKeyPath string) error {
-	args := append(sshBaseArgs(sshHostPort, sshPrivateKeyPath), "-T", "claw@127.0.0.1", "true")
-	command := exec.Command("ssh", args...)
-	output, err := command.CombinedOutput()
+	return runSSHProbeWithCommand(sshHostPort, sshPrivateKeyPath, "true")
+}
+
+func runSSHProbeWithCommand(sshHostPort int, sshPrivateKeyPath string, remoteCommand string) error {
+	args := append(sshBaseArgs(sshHostPort, sshPrivateKeyPath), "-T", "claw@127.0.0.1", remoteCommand)
+	sshCommand := exec.Command("ssh", args...)
+	output, err := sshCommand.CombinedOutput()
 	if err == nil {
 		return nil
 	}
