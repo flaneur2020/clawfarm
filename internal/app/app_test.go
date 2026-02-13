@@ -216,7 +216,7 @@ func TestNewCreatesVolumeDirectoryWhenMissing(t *testing.T) {
 	var errOut bytes.Buffer
 	application := NewWithBackend(&out, &errOut, backend)
 
-	err := application.Run([]string{"new", "ubuntu:24.04", "--workspace=" + workspace, "--run", "echo installed", "--volume", ".openclaw:/root/.openclaw"})
+	err := application.Run([]string{"new", "ubuntu:24.04", "--workspace=" + workspace, "--volume", ".openclaw:/root/.openclaw"})
 	if err != nil {
 		t.Fatalf("new command failed: %v", err)
 	}
@@ -244,8 +244,8 @@ func TestNewCreatesVolumeDirectoryWhenMissing(t *testing.T) {
 	if backend.lastSpec.VolumeMounts[0].HostPath != volumeHostPath {
 		t.Fatalf("unexpected host volume path: got %s want %s", backend.lastSpec.VolumeMounts[0].HostPath, volumeHostPath)
 	}
-	if len(backend.lastSpec.CloudInitProvision) != 1 || backend.lastSpec.CloudInitProvision[0] != "echo installed" {
-		t.Fatalf("unexpected cloud-init run commands: %#v", backend.lastSpec.CloudInitProvision)
+	if len(backend.lastSpec.SSHAuthorizedKeys) != 0 {
+		t.Fatalf("expected no ssh authorized keys without --run, got %#v", backend.lastSpec.SSHAuthorizedKeys)
 	}
 }
 

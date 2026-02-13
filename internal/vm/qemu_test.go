@@ -50,6 +50,21 @@ func TestBuildCloudInitUserData(t *testing.T) {
 	}
 }
 
+func TestBuildCloudInitUserDataIncludesSSHAuthorizedKeys(t *testing.T) {
+	key := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey clawfarm"
+	spec := StartSpec{GatewayGuestPort: 18789, SSHAuthorizedKeys: []string{key}}
+	userData := buildCloudInitUserData(spec)
+
+	for _, expected := range []string{
+		"ssh_authorized_keys:",
+		"- 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey clawfarm'",
+	} {
+		if !strings.Contains(userData, expected) {
+			t.Fatalf("cloud-init user-data missing %q", expected)
+		}
+	}
+}
+
 func TestBuildBootstrapScriptWithConfigAndEnv(t *testing.T) {
 	spec := StartSpec{
 		GatewayGuestPort:    18789,
@@ -152,6 +167,24 @@ func TestBuildBootstrapScriptIncludesVolumeMount(t *testing.T) {
 	for _, expected := range []string{
 		"install -d -m 0755 '/root/.openclaw'",
 		"mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 volume1 '/root/.openclaw'",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("bootstrap script missing %q", expected)
+		}
+	}
+}
+
+func TestBuildBootstrapScriptIncludesSSHBootstrap(t *testing.T) {
+	spec := StartSpec{
+		GatewayGuestPort:  18789,
+		SSHAuthorizedKeys: []string{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey clawfarm"},
+	}
+	script := buildBootstrapScript(spec)
+
+	for _, expected := range []string{
+		"apt-get install -y --no-install-recommends openssh-server",
+		"mkdir -p /run/sshd",
+		"systemctl enable --now ssh",
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("bootstrap script missing %q", expected)

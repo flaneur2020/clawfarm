@@ -396,6 +396,7 @@ func newCloudInitBuilder(spec StartSpec) *cloudinitbuilder.CloudInitBuilder {
 		WithOpenClawPackage(spec.OpenClawPackage).
 		WithOpenClawConfig(spec.OpenClawConfig).
 		WithOpenClawEnvironment(spec.OpenClawEnvironment).
+		WithSSHAuthorizedKeys(spec.SSHAuthorizedKeys).
 		WithVolumeMounts(cloudInitVolumeMounts).
 		WithCloudInitProvision(spec.CloudInitProvision)
 }

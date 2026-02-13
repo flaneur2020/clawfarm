@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -937,7 +938,7 @@ func (a *App) runRun(args []string) error {
 	flags.StringVar(&openClawWhatsAppVerifyToken, "openclaw-whatsapp-verify-token", "", "WhatsApp verify token (maps to WHATSAPP_VERIFY_TOKEN)")
 	flags.StringVar(&openClawWhatsAppAppSecret, "openclaw-whatsapp-app-secret", "", "WhatsApp app secret (maps to WHATSAPP_APP_SECRET)")
 	flags.Var(&openClawEnvironment, "openclaw-env", "OpenClaw env override KEY=VALUE (repeatable)")
-	flags.Var(&runCommands, "run", "run command inside guest during bootstrap (repeatable)")
+	flags.Var(&runCommands, "run", "run command inside guest over SSH as root (repeatable)")
 	flags.Var(&volumes, "volume", "volume mapping name:/guest/abs/path (repeatable)")
 	flags.Var(&published, "publish", "host:guest mapping (repeatable)")
 	flags.Var(&published, "port-forward", "alias of --publish (repeatable)")
@@ -1078,6 +1079,7 @@ func (a *App) runRun(args []string) error {
 		vmPublished = append(vmPublished, vm.PortMapping{HostPort: mapping.HostPort, GuestPort: mapping.GuestPort})
 	}
 	requestedRunCommands := normalizeProvisionCommands(runCommands.Values)
+	runCommandsRequireSSH := len(requestedRunCommands) > 0
 	requestedVolumeMappings := append([]volumeMapping(nil), volumes.Mappings...)
 
 	id := runTarget.ClawID
@@ -1097,6 +1099,8 @@ func (a *App) runRun(args []string) error {
 
 	var startResult vm.StartResult
 	var instance state.Instance
+	sshHostPort := 0
+	sshPrivateKeyPath := ""
 	err = lockManager.WithInstanceLock(id, func() error {
 		existing, loadErr := store.Load(id)
 		if loadErr != nil && !errors.Is(loadErr, state.ErrNotFound) {
@@ -1124,6 +1128,7 @@ func (a *App) runRun(args []string) error {
 		sourceDiskPath := instanceImagePath
 		clawPath := ""
 		cloudInitProvision := []string{}
+		effectivePublished := append([]vm.PortMapping(nil), vmPublished...)
 		vmVolumeMounts := make([]vm.VolumeMount, 0, len(requestedVolumeMappings))
 		for _, volume := range requestedVolumeMappings {
 			hostVolumePath := filepath.Join(instanceDir, "volumes", volume.Name)
@@ -1136,6 +1141,25 @@ func (a *App) runRun(args []string) error {
 				HostPath:  hostVolumePath,
 				GuestPath: volume.GuestPath,
 			})
+		}
+
+		sshAuthorizedKeys := []string{}
+		if runCommandsRequireSSH {
+			selectedSSHHostPort, portErr := findAvailableLoopbackPort()
+			if portErr != nil {
+				_ = lockManager.ReleaseWhileLocked(context.Background(), state.ReleaseRequest{ClawID: id})
+				return portErr
+			}
+			sshHostPort = selectedSSHHostPort
+			effectivePublished = append(effectivePublished, vm.PortMapping{HostPort: sshHostPort, GuestPort: 22})
+
+			generatedKeyPath, publicKey, keyErr := generateInstanceSSHKeyPair(instanceDir)
+			if keyErr != nil {
+				_ = lockManager.ReleaseWhileLocked(context.Background(), state.ReleaseRequest{ClawID: id})
+				return keyErr
+			}
+			sshPrivateKeyPath = generatedKeyPath
+			sshAuthorizedKeys = append(sshAuthorizedKeys, publicKey)
 		}
 
 		if runTarget.ClawboxV2Mode && runTarget.ClawboxV2Spec != nil {
@@ -1159,8 +1183,6 @@ func (a *App) runRun(args []string) error {
 			}
 		}
 
-		cloudInitProvision = append(cloudInitProvision, requestedRunCommands...)
-
 		if err := a.runProvisionCommands(context.Background(), instanceDir, imageMeta.RuntimeDisk, instanceImagePath, preparedTarget.LayerPaths, preparedTarget.ProvisionCommands); err != nil {
 			_ = lockManager.ReleaseWhileLocked(context.Background(), state.ReleaseRequest{ClawID: id})
 			return err
@@ -1176,13 +1198,14 @@ func (a *App) runRun(args []string) error {
 			StatePath:           statePath,
 			GatewayHostPort:     gatewayPort,
 			GatewayGuestPort:    gatewayPort,
-			PublishedPorts:      vmPublished,
+			PublishedPorts:      effectivePublished,
 			VolumeMounts:        vmVolumeMounts,
 			CPUs:                cpus,
 			MemoryMiB:           memoryMiB,
 			OpenClawPackage:     openClawPackage,
 			OpenClawConfig:      openClawConfig,
 			OpenClawEnvironment: openClawEnv,
+			SSHAuthorizedKeys:   sshAuthorizedKeys,
 			CloudInitProvision:  cloudInitProvision,
 		})
 		if err != nil {
@@ -1231,6 +1254,18 @@ func (a *App) runRun(args []string) error {
 			_ = lockManager.ReleaseWhileLocked(context.Background(), state.ReleaseRequest{ClawID: id})
 			return err
 		}
+
+		if runCommandsRequireSSH {
+			if err := a.runCommandsViaSSH(id, sshHostPort, sshPrivateKeyPath, requestedRunCommands); err != nil {
+				instance.Status = "unhealthy"
+				instance.LastError = err.Error()
+				instance.UpdatedAtUTC = time.Now().UTC()
+				if saveErr := store.Save(instance); saveErr != nil {
+					return fmt.Errorf("%w (also failed to save instance state: %v)", err, saveErr)
+				}
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -1252,6 +1287,9 @@ func (a *App) runRun(args []string) error {
 	for _, volume := range requestedVolumeMappings {
 		hostVolumePath := filepath.Join(instanceDir, "volumes", volume.Name)
 		fmt.Fprintf(a.out, "volume: %s -> %s\n", hostVolumePath, volume.GuestPath)
+	}
+	if runCommandsRequireSSH {
+		fmt.Fprintf(a.out, "ssh: claw@127.0.0.1:%d\n", sshHostPort)
 	}
 
 	if noWait {
@@ -2613,6 +2651,267 @@ func stripMatchingQuotes(value string) string {
 		return value[1 : len(value)-1]
 	}
 	return value
+}
+
+type runFailureAction string
+
+const (
+	runFailureActionExit     runFailureAction = "exit"
+	runFailureActionRescue   runFailureAction = "rescue"
+	runFailureActionContinue runFailureAction = "continue"
+)
+
+func findAvailableLoopbackPort() (int, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, fmt.Errorf("reserve local ssh port: %w", err)
+	}
+	defer listener.Close()
+
+	tcpAddress, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || tcpAddress.Port <= 0 {
+		return 0, errors.New("reserve local ssh port: invalid address")
+	}
+	return tcpAddress.Port, nil
+}
+
+func generateInstanceSSHKeyPair(instanceDir string) (string, string, error) {
+	sshKeygenPath, err := exec.LookPath("ssh-keygen")
+	if err != nil {
+		return "", "", errors.New("ssh-keygen is required to use --run")
+	}
+
+	sshDir := filepath.Join(instanceDir, "ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		return "", "", err
+	}
+
+	privateKeyPath := filepath.Join(sshDir, "id_ed25519")
+	publicKeyPath := privateKeyPath + ".pub"
+
+	privateInfo, privateErr := os.Stat(privateKeyPath)
+	publicPayload, publicErr := os.ReadFile(publicKeyPath)
+	if privateErr == nil && publicErr == nil && privateInfo.Mode().IsRegular() {
+		trimmedPublicKey := strings.TrimSpace(string(publicPayload))
+		if trimmedPublicKey != "" {
+			return privateKeyPath, trimmedPublicKey, nil
+		}
+	}
+
+	if removeErr := os.Remove(privateKeyPath); removeErr != nil && !os.IsNotExist(removeErr) {
+		return "", "", removeErr
+	}
+	if removeErr := os.Remove(publicKeyPath); removeErr != nil && !os.IsNotExist(removeErr) {
+		return "", "", removeErr
+	}
+
+	command := exec.Command(sshKeygenPath, "-q", "-t", "ed25519", "-N", "", "-f", privateKeyPath, "-C", "clawfarm-run")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return "", "", fmt.Errorf("generate ssh key pair: %s", message)
+	}
+
+	publicPayload, err = os.ReadFile(publicKeyPath)
+	if err != nil {
+		return "", "", err
+	}
+	trimmedPublicKey := strings.TrimSpace(string(publicPayload))
+	if trimmedPublicKey == "" {
+		return "", "", errors.New("generate ssh key pair: empty public key")
+	}
+
+	return privateKeyPath, trimmedPublicKey, nil
+}
+
+func (a *App) runCommandsViaSSH(clawID string, sshHostPort int, sshPrivateKeyPath string, commands []string) error {
+	if len(commands) == 0 {
+		return nil
+	}
+	if sshHostPort <= 0 {
+		return errors.New("invalid ssh port for --run")
+	}
+	if strings.TrimSpace(sshPrivateKeyPath) == "" {
+		return errors.New("missing ssh private key for --run")
+	}
+	if _, err := exec.LookPath("ssh"); err != nil {
+		return errors.New("ssh client is required to use --run")
+	}
+
+	fmt.Fprintf(a.out, "run: waiting for ssh on 127.0.0.1:%d\n", sshHostPort)
+	sshReadyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if err := waitForSSHReady(sshReadyCtx, sshHostPort, sshPrivateKeyPath); err != nil {
+		return fmt.Errorf("%s: wait for ssh readiness: %w", clawID, err)
+	}
+
+commandLoop:
+	for index, command := range commands {
+		trimmedCommand := strings.TrimSpace(command)
+		if trimmedCommand == "" {
+			continue
+		}
+
+		fmt.Fprintf(a.out, "run[%d/%d]: %s\n", index+1, len(commands), trimmedCommand)
+		if err := a.runSSHCommand(sshHostPort, sshPrivateKeyPath, trimmedCommand, true); err == nil {
+			continue
+		} else {
+			commandErr := fmt.Errorf("run command %d failed: %w", index+1, err)
+			if !a.canPromptForInput() {
+				return commandErr
+			}
+
+			for {
+				action, promptErr := a.promptRunFailureAction(index+1, trimmedCommand)
+				if promptErr != nil {
+					return commandErr
+				}
+
+				switch action {
+				case runFailureActionContinue:
+					continue commandLoop
+				case runFailureActionRescue:
+					if rescueErr := a.openRescueShellViaSSH(sshHostPort, sshPrivateKeyPath); rescueErr != nil {
+						fmt.Fprintf(a.errOut, "run rescue shell failed: %v\n", rescueErr)
+					}
+				case runFailureActionExit:
+					fallthrough
+				default:
+					return commandErr
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func waitForSSHReady(ctx context.Context, sshHostPort int, sshPrivateKeyPath string) error {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		if err := runSSHProbe(sshHostPort, sshPrivateKeyPath); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		select {
+		case <-ctx.Done():
+			if lastErr == nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("%w (last error: %v)", ctx.Err(), lastErr)
+		case <-ticker.C:
+		}
+	}
+}
+
+func runSSHProbe(sshHostPort int, sshPrivateKeyPath string) error {
+	args := append(sshBaseArgs(sshHostPort, sshPrivateKeyPath), "-T", "claw@127.0.0.1", "true")
+	command := exec.Command("ssh", args...)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+
+	message := strings.TrimSpace(string(output))
+	if message == "" {
+		message = err.Error()
+	}
+	return errors.New(message)
+}
+
+func (a *App) runSSHCommand(sshHostPort int, sshPrivateKeyPath string, command string, allocateTTY bool) error {
+	remoteCommand := fmt.Sprintf("sudo -n bash -lc %s", shellSingleQuote(command))
+	args := sshBaseArgs(sshHostPort, sshPrivateKeyPath)
+	if allocateTTY {
+		args = append(args, "-tt")
+	} else {
+		args = append(args, "-T")
+	}
+	args = append(args, "claw@127.0.0.1", remoteCommand)
+
+	sshCommand := exec.Command("ssh", args...)
+	sshCommand.Stdin = a.in
+	sshCommand.Stdout = a.out
+	sshCommand.Stderr = a.errOut
+
+	if err := sshCommand.Run(); err != nil {
+		return fmt.Errorf("ssh command failed: %w", err)
+	}
+	return nil
+}
+
+func (a *App) openRescueShellViaSSH(sshHostPort int, sshPrivateKeyPath string) error {
+	args := sshBaseArgs(sshHostPort, sshPrivateKeyPath)
+	args = append(args, "-tt", "claw@127.0.0.1", "sudo -n -i")
+
+	fmt.Fprintln(a.out, "run: opening rescue shell as root (exit shell to continue)")
+	command := exec.Command("ssh", args...)
+	command.Stdin = a.in
+	command.Stdout = a.out
+	command.Stderr = a.errOut
+	return command.Run()
+}
+
+func (a *App) promptRunFailureAction(index int, command string) (runFailureAction, error) {
+	if !a.canPromptForInput() || a.in == nil {
+		return runFailureActionExit, nil
+	}
+
+	reader := bufio.NewReader(a.in)
+	for {
+		fmt.Fprintf(a.out, "run[%d] failed: %s\n", index, command)
+		fmt.Fprint(a.out, "choose action [exit/rescue/continue] (default: exit): ")
+
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return runFailureActionExit, fmt.Errorf("read run failure action: %w", err)
+		}
+
+		action := normalizeRunFailureAction(line)
+		if action != "" {
+			return action, nil
+		}
+		fmt.Fprintln(a.errOut, "invalid action, expected exit, rescue, or continue")
+	}
+}
+
+func normalizeRunFailureAction(input string) runFailureAction {
+	value := strings.ToLower(strings.TrimSpace(input))
+	switch value {
+	case "", "e", "exit":
+		return runFailureActionExit
+	case "r", "rescue":
+		return runFailureActionRescue
+	case "c", "continue":
+		return runFailureActionContinue
+	default:
+		return ""
+	}
+}
+
+func sshBaseArgs(sshHostPort int, sshPrivateKeyPath string) []string {
+	return []string{
+		"-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "IdentitiesOnly=yes",
+		"-o", "ConnectTimeout=5",
+		"-o", "LogLevel=ERROR",
+		"-i", sshPrivateKeyPath,
+		"-p", strconv.Itoa(sshHostPort),
+	}
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func normalizeRunArgs(args []string) []string {

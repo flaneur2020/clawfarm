@@ -39,6 +39,7 @@ type StartSpec struct {
 	OpenClawPackage     string
 	OpenClawConfig      string
 	OpenClawEnvironment map[string]string
+	SSHAuthorizedKeys   []string
 	CloudInitProvision  []string
 }
 

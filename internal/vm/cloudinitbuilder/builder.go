@@ -16,6 +16,7 @@ type CloudInitBuilder struct {
 	OpenClawPackage     string
 	OpenClawConfig      string
 	OpenClawEnvironment map[string]string
+	SSHAuthorizedKeys   []string
 	VolumeMounts        []VolumeMount
 	CloudInitProvision  []string
 }
@@ -60,6 +61,11 @@ func (builder *CloudInitBuilder) WithOpenClawEnvironment(openClawEnvironment map
 		copied[key] = value
 	}
 	builder.OpenClawEnvironment = copied
+	return builder
+}
+
+func (builder *CloudInitBuilder) WithSSHAuthorizedKeys(sshAuthorizedKeys []string) *CloudInitBuilder {
+	builder.SSHAuthorizedKeys = append([]string(nil), sshAuthorizedKeys...)
 	return builder
 }
 
@@ -116,6 +122,7 @@ func (builder *CloudInitBuilder) CreateNoCloudSeedISO(outputPath string) error {
 
 func (builder *CloudInitBuilder) BuildCloudInitUserData() string {
 	bootstrapScript := builder.BuildBootstrapScript()
+	sshAuthorizedKeysSection := renderSSHAuthorizedKeysSection(builder.SSHAuthorizedKeys)
 	return fmt.Sprintf(`#cloud-config
 package_update: false
 users:
@@ -126,6 +133,7 @@ users:
     groups: [sudo]
     sudo: ["ALL=(ALL) NOPASSWD:ALL"]
     lock_passwd: true
+%s
 write_files:
   - path: /usr/local/bin/clawfarm-bootstrap.sh
     permissions: "0755"
@@ -134,7 +142,7 @@ write_files:
 %s
 runcmd:
   - [ bash, -lc, "/usr/local/bin/clawfarm-bootstrap.sh > /var/log/clawfarm-bootstrap.log 2>&1" ]
-`, IndentForCloudConfig(bootstrapScript, 6))
+`, sshAuthorizedKeysSection, IndentForCloudConfig(bootstrapScript, 6))
 }
 
 func (builder *CloudInitBuilder) BuildBootstrapScript() string {
@@ -159,6 +167,7 @@ func (builder *CloudInitBuilder) BuildBootstrapScript() string {
 	}
 
 	openClawEnv := renderOpenClawEnvironment(builder.OpenClawEnvironment)
+	sshBootstrapScript := renderSSHBootstrapScript(builder.SSHAuthorizedKeys)
 	volumeMountScript := renderVolumeMountScript(builder.VolumeMounts)
 	provisionScript := renderProvisionScript(builder.CloudInitProvision)
 
@@ -176,6 +185,8 @@ if ! id -u claw >/dev/null 2>&1; then
 fi
 usermod -aG sudo claw || true
 install -d -m 0755 -o claw -g claw /claw
+
+%s
 
 if ! mountpoint -q /workspace; then
   mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 workspace /workspace || true
@@ -259,7 +270,48 @@ fi
 if [[ -x /usr/local/bin/clawfarm-provision.sh ]]; then
   /usr/local/bin/clawfarm-provision.sh >/var/log/clawfarm-provision.log 2>&1
 fi
-`, volumeMountScript, openClawConfig, openClawEnv, builder.GatewayGuestPort, builder.GatewayGuestPort, provisionScript, packageName)
+`, sshBootstrapScript, volumeMountScript, openClawConfig, openClawEnv, builder.GatewayGuestPort, builder.GatewayGuestPort, provisionScript, packageName)
+}
+
+func renderSSHAuthorizedKeysSection(sshAuthorizedKeys []string) string {
+	if len(sshAuthorizedKeys) == 0 {
+		return ""
+	}
+
+	var sectionBuilder strings.Builder
+	sectionBuilder.WriteString("    ssh_authorized_keys:\n")
+	for _, key := range sshAuthorizedKeys {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			continue
+		}
+		sectionBuilder.WriteString("      - ")
+		sectionBuilder.WriteString(yamlSingleQuote(trimmed))
+		sectionBuilder.WriteString("\n")
+	}
+	return strings.TrimSuffix(sectionBuilder.String(), "\n")
+}
+
+func yamlSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func renderSSHBootstrapScript(sshAuthorizedKeys []string) string {
+	if len(sshAuthorizedKeys) == 0 {
+		return ""
+	}
+
+	return `if ! command -v sshd >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends openssh-server
+fi
+
+mkdir -p /run/sshd
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl enable --now ssh || systemctl enable --now sshd || true
+fi
+service ssh start >/dev/null 2>&1 || service sshd start >/dev/null 2>&1 || true`
 }
 
 func renderVolumeMountScript(volumeMounts []VolumeMount) string {
