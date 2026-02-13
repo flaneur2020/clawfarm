@@ -1,4 +1,4 @@
-package mount
+package state
 
 import "github.com/gofrs/flock"
 

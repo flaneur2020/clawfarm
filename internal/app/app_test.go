@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/yazhou/krunclaw/internal/clawbox"
-	"github.com/yazhou/krunclaw/internal/mount"
 	"github.com/yazhou/krunclaw/internal/state"
 	"github.com/yazhou/krunclaw/internal/vm"
 )
@@ -441,8 +440,8 @@ func TestConcurrentRunSameClawboxReturnsBusy(t *testing.T) {
 	}
 
 	err := appTwo.Run(runArgs)
-	if !errors.Is(err, mount.ErrBusy) {
-		t.Fatalf("expected mount.ErrBusy for concurrent run, got %v", err)
+	if !errors.Is(err, state.ErrBusy) {
+		t.Fatalf("expected state.ErrBusy for concurrent run, got %v", err)
 	}
 
 	close(startGate)
@@ -1277,16 +1276,16 @@ func TestExportFailsWhenInstanceLockBusy(t *testing.T) {
 		t.Fatalf("failed to parse CLAWID from run output: %s", out.String())
 	}
 
-	mountManager, err := application.mountManager()
+	lockManager, err := application.lockManager()
 	if err != nil {
-		t.Fatalf("mount manager: %v", err)
+		t.Fatalf("lock manager: %v", err)
 	}
 
 	lockReady := make(chan struct{})
 	lockDone := make(chan error, 1)
 	releaseLock := make(chan struct{})
 	go func() {
-		lockDone <- mountManager.WithInstanceLock(id, func() error {
+		lockDone <- lockManager.WithInstanceLock(id, func() error {
 			close(lockReady)
 			<-releaseLock
 			return nil
@@ -1300,8 +1299,8 @@ func TestExportFailsWhenInstanceLockBusy(t *testing.T) {
 	}
 
 	err = application.Run([]string{"export", id, filepath.Join(t.TempDir(), "busy.clawbox")})
-	if !errors.Is(err, mount.ErrBusy) {
-		t.Fatalf("expected mount.ErrBusy, got %v", err)
+	if !errors.Is(err, state.ErrBusy) {
+		t.Fatalf("expected state.ErrBusy, got %v", err)
 	}
 
 	close(releaseLock)

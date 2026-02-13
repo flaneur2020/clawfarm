@@ -29,7 +29,6 @@ import (
 	"github.com/yazhou/krunclaw/internal/clawbox"
 	"github.com/yazhou/krunclaw/internal/config"
 	"github.com/yazhou/krunclaw/internal/images"
-	"github.com/yazhou/krunclaw/internal/mount"
 	"github.com/yazhou/krunclaw/internal/state"
 	"github.com/yazhou/krunclaw/internal/vm"
 )
@@ -1044,7 +1043,7 @@ func (a *App) runRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	mountManager, err := a.mountManager()
+	lockManager, err := a.lockManager()
 	if err != nil {
 		return err
 	}
@@ -1071,27 +1070,27 @@ func (a *App) runRun(args []string) error {
 
 	var startResult vm.StartResult
 	var instance state.Instance
-	err = mountManager.WithInstanceLock(id, func() error {
+	err = lockManager.WithInstanceLock(id, func() error {
 		existing, loadErr := store.Load(id)
 		if loadErr != nil && !errors.Is(loadErr, state.ErrNotFound) {
 			return loadErr
 		}
 		if loadErr == nil && existing.PID > 0 && a.backend.IsRunning(existing.PID) {
-			return mount.ErrBusy
+			return state.ErrBusy
 		}
 
 		if err := ensureDir(statePath); err != nil {
 			return err
 		}
 
-		acquireRequest := mount.AcquireRequest{
+		acquireRequest := state.AcquireRequest{
 			ClawID:     id,
 			InstanceID: id,
 		}
 		if !runTarget.SkipMount {
 			acquireRequest.SourcePath = mountSource
 		}
-		if err := mountManager.AcquireWhileLocked(context.Background(), acquireRequest); err != nil {
+		if err := lockManager.AcquireWhileLocked(context.Background(), acquireRequest); err != nil {
 			return err
 		}
 
@@ -1102,7 +1101,7 @@ func (a *App) runRun(args []string) error {
 		if runTarget.ClawboxV2Mode && runTarget.ClawboxV2Spec != nil {
 			importedRunDiskPath, importErr := importRunClawboxV2(runTarget, id, clawsRoot, imageMeta.RuntimeDisk)
 			if importErr != nil {
-				_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+				_ = lockManager.ReleaseWhileLocked(context.Background(), state.ReleaseRequest{ClawID: id})
 				return importErr
 			}
 			sourceDiskPath = importedRunDiskPath
@@ -1115,13 +1114,13 @@ func (a *App) runRun(args []string) error {
 			cloudInitProvision = runTarget.ClawboxV2Spec.provisionScripts()
 		} else {
 			if err := copyFile(imageMeta.RuntimeDisk, instanceImagePath); err != nil {
-				_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+				_ = lockManager.ReleaseWhileLocked(context.Background(), state.ReleaseRequest{ClawID: id})
 				return err
 			}
 		}
 
 		if err := a.runProvisionCommands(context.Background(), instanceDir, imageMeta.RuntimeDisk, instanceImagePath, preparedTarget.LayerPaths, preparedTarget.ProvisionCommands); err != nil {
-			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+			_ = lockManager.ReleaseWhileLocked(context.Background(), state.ReleaseRequest{ClawID: id})
 			return err
 		}
 
@@ -1144,10 +1143,10 @@ func (a *App) runRun(args []string) error {
 			CloudInitProvision:  cloudInitProvision,
 		})
 		if err != nil {
-			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+			_ = lockManager.ReleaseWhileLocked(context.Background(), state.ReleaseRequest{ClawID: id})
 			return err
 		}
-		if err := mountManager.AcquireWhileLocked(context.Background(), mount.AcquireRequest{
+		if err := lockManager.AcquireWhileLocked(context.Background(), state.AcquireRequest{
 			ClawID:     id,
 			InstanceID: id,
 			PID:        startResult.PID,
@@ -1155,7 +1154,7 @@ func (a *App) runRun(args []string) error {
 			stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 			defer cancel()
 			_ = a.backend.Stop(stopCtx, startResult.PID)
-			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+			_ = lockManager.ReleaseWhileLocked(context.Background(), state.ReleaseRequest{ClawID: id})
 			return err
 		}
 
@@ -1186,7 +1185,7 @@ func (a *App) runRun(args []string) error {
 			stopCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 			defer cancel()
 			_ = a.backend.Stop(stopCtx, startResult.PID)
-			_ = mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: id, Unmount: !runTarget.SkipMount})
+			_ = lockManager.ReleaseWhileLocked(context.Background(), state.ReleaseRequest{ClawID: id})
 			return err
 		}
 		return nil
@@ -1411,13 +1410,13 @@ func (a *App) runRemove(args []string) error {
 	if err != nil {
 		return err
 	}
-	mountManager, err := a.mountManager()
+	lockManager, err := a.lockManager()
 	if err != nil {
 		return err
 	}
 
 	id := args[0]
-	err = mountManager.WithInstanceLock(id, func() error {
+	err = lockManager.WithInstanceLock(id, func() error {
 		instance, loadErr := store.Load(id)
 		if loadErr != nil {
 			if errors.Is(loadErr, state.ErrNotFound) {
@@ -1433,7 +1432,7 @@ func (a *App) runRemove(args []string) error {
 				return err
 			}
 		}
-		if err := mountManager.ReleaseWhileLocked(context.Background(), mount.ReleaseRequest{ClawID: instance.ID, Unmount: true}); err != nil {
+		if err := lockManager.ReleaseWhileLocked(context.Background(), state.ReleaseRequest{ClawID: instance.ID}); err != nil {
 			return err
 		}
 
@@ -1498,12 +1497,12 @@ func (a *App) runExport(args []string) error {
 	if err != nil {
 		return err
 	}
-	mountManager, err := a.mountManager()
+	lockManager, err := a.lockManager()
 	if err != nil {
 		return err
 	}
 
-	err = mountManager.WithInstanceLock(id, func() error {
+	err = lockManager.WithInstanceLock(id, func() error {
 		if _, loadErr := store.Load(id); loadErr != nil {
 			if errors.Is(loadErr, state.ErrNotFound) {
 				return fmt.Errorf("instance %s not found", id)
@@ -1511,11 +1510,11 @@ func (a *App) runExport(args []string) error {
 			return loadErr
 		}
 
-		mountState, inspectErr := mountManager.Inspect(id)
+		lockState, inspectErr := lockManager.Inspect(id)
 		if inspectErr != nil {
 			return inspectErr
 		}
-		sourcePath := strings.TrimSpace(mountState.SourcePath)
+		sourcePath := strings.TrimSpace(lockState.SourcePath)
 		if sourcePath == "" {
 			return fmt.Errorf("instance %s has no exportable clawbox source", id)
 		}
@@ -1589,13 +1588,13 @@ func (a *App) runCheckpoint(args []string) error {
 	if err != nil {
 		return err
 	}
-	mountManager, err := a.mountManager()
+	lockManager, err := a.lockManager()
 	if err != nil {
 		return err
 	}
 	checkpointPath := checkpointPathForName(clawsRoot, id, checkpointName)
 
-	err = mountManager.WithInstanceLock(id, func() error {
+	err = lockManager.WithInstanceLock(id, func() error {
 		instance, loadErr := store.Load(id)
 		if loadErr != nil {
 			if errors.Is(loadErr, state.ErrNotFound) {
@@ -1653,13 +1652,13 @@ func (a *App) runRestore(args []string) error {
 	if err != nil {
 		return err
 	}
-	mountManager, err := a.mountManager()
+	lockManager, err := a.lockManager()
 	if err != nil {
 		return err
 	}
 	checkpointPath := checkpointPathForName(clawsRoot, id, checkpointName)
 
-	err = mountManager.WithInstanceLock(id, func() error {
+	err = lockManager.WithInstanceLock(id, func() error {
 		instance, loadErr := store.Load(id)
 		if loadErr != nil {
 			if errors.Is(loadErr, state.ErrNotFound) {
@@ -1779,7 +1778,7 @@ func (a *App) instanceStore() (*state.Store, string, error) {
 	return state.NewStore(clawsRoot), clawsRoot, nil
 }
 
-func (a *App) mountManager() (*mount.Manager, error) {
+func (a *App) lockManager() (*state.LockManager, error) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return nil, err
@@ -1788,7 +1787,7 @@ func (a *App) mountManager() (*mount.Manager, error) {
 	if err := ensureDir(clawsRoot); err != nil {
 		return nil, err
 	}
-	return mount.NewManager(clawsRoot, nil, nil), nil
+	return state.NewLockManager(clawsRoot, nil), nil
 }
 
 func ensureDir(path string) error {

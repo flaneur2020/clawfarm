@@ -1,4 +1,4 @@
-package mount
+package state
 
 import (
 	"bytes"
@@ -15,13 +15,12 @@ import (
 const (
 	lockFileName  = "instance.flock"
 	stateFileName = "state.json"
-	mountDirName  = "mount"
 )
 
 var (
-	ErrBusy          = errors.New("claw is busy")
-	ErrMountConflict = errors.New("mount source conflict")
-	ErrInvalidState  = errors.New("invalid mount state")
+	ErrBusy           = errors.New("claw is busy")
+	ErrSourceConflict = errors.New("source path conflict")
+	ErrInvalidState   = errors.New("invalid lock state")
 
 	clawIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,127}$`)
 )
@@ -34,11 +33,10 @@ type AcquireRequest struct {
 }
 
 type ReleaseRequest struct {
-	ClawID  string
-	Unmount bool
+	ClawID string
 }
 
-type State struct {
+type LockState struct {
 	Active       bool      `json:"active"`
 	InstanceID   string    `json:"instance_id,omitempty"`
 	PID          int       `json:"pid,omitempty"`
@@ -54,37 +52,26 @@ type Locker interface {
 	TryLock(path string) (handle LockHandle, ok bool, err error)
 }
 
-type Mounter interface {
-	MountReadOnly(ctx context.Context, source string, target string) error
-	Unmount(ctx context.Context, target string) error
-	IsMounted(ctx context.Context, target string) (bool, error)
+type LockManager struct {
+	root   string
+	locker Locker
+	now    func() time.Time
 }
 
-type Manager struct {
-	root    string
-	locker  Locker
-	mounter Mounter
-	now     func() time.Time
-}
-
-func NewManager(root string, locker Locker, mounter Mounter) *Manager {
+func NewLockManager(root string, locker Locker) *LockManager {
 	if locker == nil {
 		locker = NewFlockLocker()
 	}
-	if mounter == nil {
-		mounter = noopMounter{}
-	}
-	return &Manager{
-		root:    root,
-		locker:  locker,
-		mounter: mounter,
+	return &LockManager{
+		root:   root,
+		locker: locker,
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
 	}
 }
 
-func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) error {
+func (m *LockManager) Acquire(ctx context.Context, req AcquireRequest) error {
 	normalizedReq, err := normalizeAcquireRequest(req)
 	if err != nil {
 		return err
@@ -95,7 +82,7 @@ func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) error {
 	})
 }
 
-func (m *Manager) AcquireWhileLocked(ctx context.Context, req AcquireRequest) error {
+func (m *LockManager) AcquireWhileLocked(ctx context.Context, req AcquireRequest) error {
 	normalizedReq, err := normalizeAcquireRequest(req)
 	if err != nil {
 		return err
@@ -106,7 +93,7 @@ func (m *Manager) AcquireWhileLocked(ctx context.Context, req AcquireRequest) er
 	return m.acquireLocked(ctx, normalizedReq)
 }
 
-func (m *Manager) Release(ctx context.Context, req ReleaseRequest) error {
+func (m *LockManager) Release(ctx context.Context, req ReleaseRequest) error {
 	normalizedReq, err := normalizeReleaseRequest(req)
 	if err != nil {
 		return err
@@ -117,7 +104,7 @@ func (m *Manager) Release(ctx context.Context, req ReleaseRequest) error {
 	})
 }
 
-func (m *Manager) ReleaseWhileLocked(ctx context.Context, req ReleaseRequest) error {
+func (m *LockManager) ReleaseWhileLocked(ctx context.Context, req ReleaseRequest) error {
 	normalizedReq, err := normalizeReleaseRequest(req)
 	if err != nil {
 		return err
@@ -128,27 +115,7 @@ func (m *Manager) ReleaseWhileLocked(ctx context.Context, req ReleaseRequest) er
 	return m.releaseLocked(ctx, normalizedReq)
 }
 
-func (m *Manager) Recover(ctx context.Context, clawID string) error {
-	if err := validateClawID(clawID); err != nil {
-		return err
-	}
-
-	return m.withLock(clawID, func() error {
-		return m.recoverLocked(ctx, clawID)
-	})
-}
-
-func (m *Manager) RecoverWhileLocked(ctx context.Context, clawID string) error {
-	if err := validateClawID(clawID); err != nil {
-		return err
-	}
-	if err := m.ensurePaths(clawID); err != nil {
-		return err
-	}
-	return m.recoverLocked(ctx, clawID)
-}
-
-func (m *Manager) WithInstanceLock(clawID string, fn func() error) error {
+func (m *LockManager) WithInstanceLock(clawID string, fn func() error) error {
 	if err := validateClawID(clawID); err != nil {
 		return err
 	}
@@ -158,16 +125,15 @@ func (m *Manager) WithInstanceLock(clawID string, fn func() error) error {
 	return m.withLock(clawID, fn)
 }
 
-func (m *Manager) Inspect(clawID string) (State, error) {
+func (m *LockManager) Inspect(clawID string) (LockState, error) {
 	if err := validateClawID(clawID); err != nil {
-		return State{}, err
+		return LockState{}, err
 	}
 	return readState(m.statePath(clawID))
 }
 
-func (m *Manager) acquireLocked(ctx context.Context, req AcquireRequest) error {
+func (m *LockManager) acquireLocked(ctx context.Context, req AcquireRequest) error {
 	statePath := m.statePath(req.ClawID)
-	mountPath := m.mountPath(req.ClawID)
 
 	state, err := readState(statePath)
 	if err != nil {
@@ -175,18 +141,8 @@ func (m *Manager) acquireLocked(ctx context.Context, req AcquireRequest) error {
 	}
 
 	if req.SourcePath != "" {
-		mounted, err := m.mounter.IsMounted(ctx, mountPath)
-		if err != nil {
-			return err
-		}
-		if mounted {
-			if state.SourcePath != "" && state.SourcePath != req.SourcePath {
-				return ErrMountConflict
-			}
-		} else {
-			if err := m.mounter.MountReadOnly(ctx, req.SourcePath, mountPath); err != nil {
-				return err
-			}
+		if state.SourcePath != "" && state.SourcePath != req.SourcePath {
+			return ErrSourceConflict
 		}
 		state.SourcePath = req.SourcePath
 	}
@@ -198,48 +154,12 @@ func (m *Manager) acquireLocked(ctx context.Context, req AcquireRequest) error {
 	return writeState(statePath, state)
 }
 
-func (m *Manager) releaseLocked(ctx context.Context, req ReleaseRequest) error {
+func (m *LockManager) releaseLocked(ctx context.Context, req ReleaseRequest) error {
 	statePath := m.statePath(req.ClawID)
-	mountPath := m.mountPath(req.ClawID)
 
 	state, err := readState(statePath)
 	if err != nil {
 		return err
-	}
-	if req.Unmount {
-		if err := m.mounter.Unmount(ctx, mountPath); err != nil {
-			return err
-		}
-	}
-
-	state.Active = false
-	state.PID = 0
-	state.InstanceID = ""
-	state.UpdatedAtUTC = m.now()
-	return writeState(statePath, state)
-}
-
-func (m *Manager) recoverLocked(ctx context.Context, clawID string) error {
-	statePath := m.statePath(clawID)
-	mountPath := m.mountPath(clawID)
-
-	state, err := readState(statePath)
-	if err != nil {
-		if errors.Is(err, ErrInvalidState) {
-			state = State{}
-		} else {
-			return err
-		}
-	}
-
-	mounted, err := m.mounter.IsMounted(ctx, mountPath)
-	if err != nil {
-		return err
-	}
-	if mounted {
-		if err := m.mounter.Unmount(ctx, mountPath); err != nil {
-			return err
-		}
 	}
 
 	state.Active = false
@@ -270,18 +190,15 @@ func normalizeReleaseRequest(req ReleaseRequest) (ReleaseRequest, error) {
 	return req, nil
 }
 
-func (m *Manager) ensurePaths(clawID string) error {
+func (m *LockManager) ensurePaths(clawID string) error {
 	clawDir := m.clawDir(clawID)
 	if err := os.MkdirAll(clawDir, 0o755); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(m.mountPath(clawID), 0o755); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (m *Manager) withLock(clawID string, fn func() error) error {
+func (m *LockManager) withLock(clawID string, fn func() error) error {
 	if err := m.ensurePaths(clawID); err != nil {
 		return err
 	}
@@ -304,20 +221,16 @@ func (m *Manager) withLock(clawID string, fn func() error) error {
 	return nil
 }
 
-func (m *Manager) clawDir(clawID string) string {
+func (m *LockManager) clawDir(clawID string) string {
 	return filepath.Join(m.root, clawID)
 }
 
-func (m *Manager) lockPath(clawID string) string {
+func (m *LockManager) lockPath(clawID string) string {
 	return filepath.Join(m.clawDir(clawID), lockFileName)
 }
 
-func (m *Manager) statePath(clawID string) string {
+func (m *LockManager) statePath(clawID string) string {
 	return filepath.Join(m.clawDir(clawID), stateFileName)
-}
-
-func (m *Manager) mountPath(clawID string) string {
-	return filepath.Join(m.clawDir(clawID), mountDirName)
 }
 
 func validateClawID(clawID string) error {
@@ -327,25 +240,25 @@ func validateClawID(clawID string) error {
 	return nil
 }
 
-func readState(path string) (State, error) {
+func readState(path string) (LockState, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return State{}, nil
+			return LockState{}, nil
 		}
-		return State{}, err
+		return LockState{}, err
 	}
 
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	var state State
+	var state LockState
 	if err := decoder.Decode(&state); err != nil {
-		return State{}, fmt.Errorf("%w: %v", ErrInvalidState, err)
+		return LockState{}, fmt.Errorf("%w: %v", ErrInvalidState, err)
 	}
 	return state, nil
 }
 
-func writeState(path string, state State) error {
+func writeState(path string, state LockState) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -361,18 +274,4 @@ func writeState(path string, state State) error {
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(state)
-}
-
-type noopMounter struct{}
-
-func (noopMounter) MountReadOnly(context.Context, string, string) error {
-	return nil
-}
-
-func (noopMounter) Unmount(context.Context, string) error {
-	return nil
-}
-
-func (noopMounter) IsMounted(context.Context, string) (bool, error) {
-	return false, nil
 }
