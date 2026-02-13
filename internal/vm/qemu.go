@@ -15,8 +15,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yazhou/krunclaw/internal/cloudinitbuilder"
-	"github.com/yazhou/krunclaw/internal/qemubuilder"
+	"github.com/yazhou/krunclaw/internal/vm/cloudinitbuilder"
+	"github.com/yazhou/krunclaw/internal/vm/qemuargsbuilder"
 )
 
 const (
@@ -243,12 +243,12 @@ func buildQEMUArgs(
 	pidFilePath string,
 	monitorPath string,
 ) ([]string, error) {
-	published := make([]qemubuilder.PortMapping, 0, len(spec.PublishedPorts))
+	published := make([]qemuargsbuilder.PortMapping, 0, len(spec.PublishedPorts))
 	for _, mapping := range spec.PublishedPorts {
-		published = append(published, qemubuilder.PortMapping{HostPort: mapping.HostPort, GuestPort: mapping.GuestPort})
+		published = append(published, qemuargsbuilder.PortMapping{HostPort: mapping.HostPort, GuestPort: mapping.GuestPort})
 	}
 
-	builder := qemubuilder.NewQemuArgsBuilder().
+	builder := qemuargsbuilder.NewQemuArgsBuilder().
 		WithPlatform(platform.Machine, platform.CPU, platform.Accel, platform.NetDevice, platform.Firmware).
 		WithDisk(diskPath, diskFormat, seedISO).
 		WithRuntimePaths(spec.WorkspacePath, spec.StatePath, spec.ClawPath, serialLogPath, qemuLogPath, pidFilePath, monitorPath).
@@ -258,12 +258,12 @@ func buildQEMUArgs(
 }
 
 func normalizePortForwards(gatewayHostPort int, gatewayGuestPort int, published []PortMapping) ([]PortMapping, error) {
-	mappings := make([]qemubuilder.PortMapping, 0, len(published))
+	mappings := make([]qemuargsbuilder.PortMapping, 0, len(published))
 	for _, mapping := range published {
-		mappings = append(mappings, qemubuilder.PortMapping{HostPort: mapping.HostPort, GuestPort: mapping.GuestPort})
+		mappings = append(mappings, qemuargsbuilder.PortMapping{HostPort: mapping.HostPort, GuestPort: mapping.GuestPort})
 	}
 
-	resolved, err := qemubuilder.NormalizePortForwards(gatewayHostPort, gatewayGuestPort, mappings)
+	resolved, err := qemuargsbuilder.NormalizePortForwards(gatewayHostPort, gatewayGuestPort, mappings)
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +276,7 @@ func normalizePortForwards(gatewayHostPort int, gatewayGuestPort int, published 
 }
 
 func validatePort(port int) error {
-	return qemubuilder.ValidatePort(port)
+	return qemuargsbuilder.ValidatePort(port)
 }
 
 func prepareInstanceDisk(sourceDiskPath string, instanceDir string, out io.Writer) (string, string, error) {
