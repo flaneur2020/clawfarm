@@ -16,7 +16,13 @@ type CloudInitBuilder struct {
 	OpenClawPackage     string
 	OpenClawConfig      string
 	OpenClawEnvironment map[string]string
+	VolumeMounts        []VolumeMount
 	CloudInitProvision  []string
+}
+
+type VolumeMount struct {
+	Tag       string
+	GuestPath string
 }
 
 func NewCloudInitBuilder() *CloudInitBuilder {
@@ -59,6 +65,11 @@ func (builder *CloudInitBuilder) WithOpenClawEnvironment(openClawEnvironment map
 
 func (builder *CloudInitBuilder) WithCloudInitProvision(cloudInitProvision []string) *CloudInitBuilder {
 	builder.CloudInitProvision = append([]string(nil), cloudInitProvision...)
+	return builder
+}
+
+func (builder *CloudInitBuilder) WithVolumeMounts(volumeMounts []VolumeMount) *CloudInitBuilder {
+	builder.VolumeMounts = append([]VolumeMount(nil), volumeMounts...)
 	return builder
 }
 
@@ -148,6 +159,7 @@ func (builder *CloudInitBuilder) BuildBootstrapScript() string {
 	}
 
 	openClawEnv := renderOpenClawEnvironment(builder.OpenClawEnvironment)
+	volumeMountScript := renderVolumeMountScript(builder.VolumeMounts)
 	provisionScript := renderProvisionScript(builder.CloudInitProvision)
 
 	return fmt.Sprintf(`#!/usr/bin/env bash
@@ -174,6 +186,8 @@ fi
 if ! mountpoint -q /claw; then
   mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 claw /claw || true
 fi
+
+%s
 
 chown -R claw:claw /claw || true
 
@@ -245,7 +259,29 @@ fi
 if [[ -x /usr/local/bin/clawfarm-provision.sh ]]; then
   /usr/local/bin/clawfarm-provision.sh >/var/log/clawfarm-provision.log 2>&1
 fi
-`, openClawConfig, openClawEnv, builder.GatewayGuestPort, builder.GatewayGuestPort, provisionScript, packageName)
+`, volumeMountScript, openClawConfig, openClawEnv, builder.GatewayGuestPort, builder.GatewayGuestPort, provisionScript, packageName)
+}
+
+func renderVolumeMountScript(volumeMounts []VolumeMount) string {
+	if len(volumeMounts) == 0 {
+		return ""
+	}
+
+	var scriptBuilder strings.Builder
+	for _, mount := range volumeMounts {
+		tag := strings.TrimSpace(mount.Tag)
+		guestPath := strings.TrimSpace(mount.GuestPath)
+		if tag == "" || guestPath == "" {
+			continue
+		}
+		quotedGuestPath := shellSingleQuote(guestPath)
+		scriptBuilder.WriteString(fmt.Sprintf("install -d -m 0755 %s\n", quotedGuestPath))
+		scriptBuilder.WriteString(fmt.Sprintf("if ! mountpoint -q %s; then\n", quotedGuestPath))
+		scriptBuilder.WriteString(fmt.Sprintf("  mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 %s %s || true\n", tag, quotedGuestPath))
+		scriptBuilder.WriteString("fi\n")
+	}
+
+	return strings.TrimSpace(scriptBuilder.String())
 }
 
 func renderProvisionScript(commands []string) string {

@@ -12,6 +12,11 @@ type PortMapping struct {
 	GuestPort int
 }
 
+type VolumeMount struct {
+	HostPath string
+	Tag      string
+}
+
 type QemuArgsBuilder struct {
 	Machine          string
 	CPU              string
@@ -31,6 +36,7 @@ type QemuArgsBuilder struct {
 	GatewayHostPort  int
 	GatewayGuestPort int
 	PublishedPorts   []PortMapping
+	VolumeMounts     []VolumeMount
 	CPUs             int
 	MemoryMiB        int
 }
@@ -87,6 +93,11 @@ func (builder *QemuArgsBuilder) WithResources(cpus int, memoryMiB int) *QemuArgs
 	return builder
 }
 
+func (builder *QemuArgsBuilder) WithVolumeMounts(volumeMounts []VolumeMount) *QemuArgsBuilder {
+	builder.VolumeMounts = append([]VolumeMount(nil), volumeMounts...)
+	return builder
+}
+
 func (builder *QemuArgsBuilder) Build() ([]string, error) {
 	paths := []string{
 		builder.DiskPath,
@@ -101,9 +112,21 @@ func (builder *QemuArgsBuilder) Build() ([]string, error) {
 	if builder.Firmware != "" {
 		paths = append(paths, builder.Firmware)
 	}
+	for _, mount := range builder.VolumeMounts {
+		paths = append(paths, mount.HostPath)
+	}
 	for _, path := range paths {
 		if strings.Contains(path, ",") {
 			return nil, fmt.Errorf("path contains unsupported comma: %s", path)
+		}
+	}
+
+	for _, mount := range builder.VolumeMounts {
+		if strings.TrimSpace(mount.Tag) == "" {
+			return nil, errors.New("volume mount tag is required")
+		}
+		if strings.Contains(mount.Tag, ",") {
+			return nil, fmt.Errorf("volume mount tag contains unsupported comma: %s", mount.Tag)
 		}
 	}
 
@@ -148,6 +171,13 @@ func (builder *QemuArgsBuilder) Build() ([]string, error) {
 		args = append(args,
 			"-virtfs",
 			fmt.Sprintf("local,path=%s,mount_tag=claw,security_model=none,id=claw", builder.ClawPath),
+		)
+	}
+
+	for index, mount := range builder.VolumeMounts {
+		args = append(args,
+			"-virtfs",
+			fmt.Sprintf("local,path=%s,mount_tag=%s,security_model=none,id=volume%d", mount.HostPath, mount.Tag, index+1),
 		)
 	}
 

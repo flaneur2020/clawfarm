@@ -63,6 +63,9 @@ func (b *QEMUBackend) Start(ctx context.Context, spec StartSpec) (StartResult, e
 	if err := validatePort(spec.GatewayGuestPort); err != nil {
 		return StartResult{}, fmt.Errorf("gateway guest port: %w", err)
 	}
+	if _, _, err := buildVolumeMountSpecs(spec.VolumeMounts); err != nil {
+		return StartResult{}, err
+	}
 
 	if err := os.MkdirAll(spec.InstanceDir, 0o755); err != nil {
 		return StartResult{}, err
@@ -247,12 +250,17 @@ func buildQEMUArgs(
 	for _, mapping := range spec.PublishedPorts {
 		published = append(published, qemuargsbuilder.PortMapping{HostPort: mapping.HostPort, GuestPort: mapping.GuestPort})
 	}
+	qemuVolumeMounts, _, err := buildVolumeMountSpecs(spec.VolumeMounts)
+	if err != nil {
+		return nil, err
+	}
 
 	builder := qemuargsbuilder.NewQemuArgsBuilder().
 		WithPlatform(platform.Machine, platform.CPU, platform.Accel, platform.NetDevice, platform.Firmware).
 		WithDisk(diskPath, diskFormat, seedISO).
 		WithRuntimePaths(spec.WorkspacePath, spec.StatePath, spec.ClawPath, serialLogPath, qemuLogPath, pidFilePath, monitorPath).
 		WithPorts(spec.GatewayHostPort, spec.GatewayGuestPort, published).
+		WithVolumeMounts(qemuVolumeMounts).
 		WithResources(spec.CPUs, spec.MemoryMiB)
 	return builder.Build()
 }
@@ -380,13 +388,44 @@ func indentForCloudConfig(content string, spaces int) string {
 }
 
 func newCloudInitBuilder(spec StartSpec) *cloudinitbuilder.CloudInitBuilder {
+	_, cloudInitVolumeMounts, _ := buildVolumeMountSpecs(spec.VolumeMounts)
+
 	return cloudinitbuilder.NewCloudInitBuilder().
 		WithInstance(spec.InstanceID, spec.InstanceDir).
 		WithGatewayGuestPort(spec.GatewayGuestPort).
 		WithOpenClawPackage(spec.OpenClawPackage).
 		WithOpenClawConfig(spec.OpenClawConfig).
 		WithOpenClawEnvironment(spec.OpenClawEnvironment).
+		WithVolumeMounts(cloudInitVolumeMounts).
 		WithCloudInitProvision(spec.CloudInitProvision)
+}
+
+func buildVolumeMountSpecs(volumeMounts []VolumeMount) ([]qemuargsbuilder.VolumeMount, []cloudinitbuilder.VolumeMount, error) {
+	if len(volumeMounts) == 0 {
+		return nil, nil, nil
+	}
+
+	qemuMounts := make([]qemuargsbuilder.VolumeMount, 0, len(volumeMounts))
+	cloudInitMounts := make([]cloudinitbuilder.VolumeMount, 0, len(volumeMounts))
+	for index, volumeMount := range volumeMounts {
+		hostPath := strings.TrimSpace(volumeMount.HostPath)
+		guestPath := strings.TrimSpace(volumeMount.GuestPath)
+		if hostPath == "" {
+			return nil, nil, fmt.Errorf("volume[%d] host path is required", index)
+		}
+		if guestPath == "" {
+			return nil, nil, fmt.Errorf("volume[%d] guest path is required", index)
+		}
+		if !filepath.IsAbs(guestPath) {
+			return nil, nil, fmt.Errorf("volume[%d] guest path must be absolute: %s", index, guestPath)
+		}
+
+		tag := fmt.Sprintf("volume%d", index+1)
+		qemuMounts = append(qemuMounts, qemuargsbuilder.VolumeMount{HostPath: hostPath, Tag: tag})
+		cloudInitMounts = append(cloudInitMounts, cloudinitbuilder.VolumeMount{Tag: tag, GuestPath: guestPath})
+	}
+
+	return qemuMounts, cloudInitMounts, nil
 }
 
 func waitForPIDFile(path string, timeout time.Duration) (int, error) {

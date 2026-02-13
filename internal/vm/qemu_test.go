@@ -106,6 +106,59 @@ func TestBuildQEMUArgsIncludesClawVirtfs(t *testing.T) {
 	}
 }
 
+func TestBuildQEMUArgsIncludesVolumeVirtfs(t *testing.T) {
+	args, err := buildQEMUArgs(
+		StartSpec{
+			WorkspacePath:    "/tmp/workspace",
+			StatePath:        "/tmp/state",
+			GatewayHostPort:  18789,
+			GatewayGuestPort: 18789,
+			VolumeMounts: []VolumeMount{
+				{Name: ".openclaw", HostPath: "/tmp/instance/volumes/.openclaw", GuestPath: "/root/.openclaw"},
+			},
+			CPUs:      2,
+			MemoryMiB: 2048,
+		},
+		qemuPlatform{Machine: "q35", CPU: "host", NetDevice: "virtio-net-pci", Accel: "hvf"},
+		"/tmp/disk.qcow2",
+		"qcow2",
+		"/tmp/seed.iso",
+		"/tmp/serial.log",
+		"/tmp/qemu.log",
+		"/tmp/qemu.pid",
+		"/tmp/qemu.sock",
+	)
+	if err != nil {
+		t.Fatalf("buildQEMUArgs failed: %v", err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "mount_tag=volume1") {
+		t.Fatalf("expected volume virtfs mount tag, got args: %s", joined)
+	}
+	if !strings.Contains(joined, "path=/tmp/instance/volumes/.openclaw") {
+		t.Fatalf("expected volume host path in args: %s", joined)
+	}
+}
+
+func TestBuildBootstrapScriptIncludesVolumeMount(t *testing.T) {
+	spec := StartSpec{
+		GatewayGuestPort: 18789,
+		VolumeMounts: []VolumeMount{
+			{Name: ".openclaw", HostPath: "/tmp/instance/volumes/.openclaw", GuestPath: "/root/.openclaw"},
+		},
+	}
+	script := buildBootstrapScript(spec)
+
+	for _, expected := range []string{
+		"install -d -m 0755 '/root/.openclaw'",
+		"mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 volume1 '/root/.openclaw'",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("bootstrap script missing %q", expected)
+		}
+	}
+}
+
 func TestIndentForCloudConfig(t *testing.T) {
 	content := "line1\nline2\n"
 	indented := indentForCloudConfig(content, 4)

@@ -196,6 +196,59 @@ func TestRunFlowAndInstanceLifecycle(t *testing.T) {
 	}
 }
 
+func TestNewCreatesVolumeDirectoryWhenMissing(t *testing.T) {
+	cache := t.TempDir()
+	data := t.TempDir()
+	if err := os.Setenv("CLAWFARM_CACHE_DIR", cache); err != nil {
+		t.Fatalf("set cache env: %v", err)
+	}
+	defer os.Unsetenv("CLAWFARM_CACHE_DIR")
+	if err := os.Setenv("CLAWFARM_DATA_DIR", data); err != nil {
+		t.Fatalf("set data env: %v", err)
+	}
+	defer os.Unsetenv("CLAWFARM_DATA_DIR")
+
+	seedFetchedImage(t, cache)
+	workspace := t.TempDir()
+
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	err := application.Run([]string{"new", "ubuntu:24.04", "--workspace=" + workspace, "--run", "echo installed", "--volume", ".openclaw:/root/.openclaw"})
+	if err != nil {
+		t.Fatalf("new command failed: %v", err)
+	}
+
+	id := parseClawIDFromRunOutput(out.String())
+	if id == "" {
+		t.Fatalf("failed to parse CLAWID from new output: %s", out.String())
+	}
+
+	volumeHostPath := filepath.Join(data, "claws", id, "volumes", ".openclaw")
+	info, statErr := os.Stat(volumeHostPath)
+	if statErr != nil {
+		t.Fatalf("expected volume dir to exist at %s: %v", volumeHostPath, statErr)
+	}
+	if !info.IsDir() {
+		t.Fatalf("expected volume path to be a directory: %s", volumeHostPath)
+	}
+
+	if len(backend.lastSpec.VolumeMounts) != 1 {
+		t.Fatalf("expected one volume mount passed to backend, got %d", len(backend.lastSpec.VolumeMounts))
+	}
+	if backend.lastSpec.VolumeMounts[0].GuestPath != "/root/.openclaw" {
+		t.Fatalf("unexpected guest volume path: %s", backend.lastSpec.VolumeMounts[0].GuestPath)
+	}
+	if backend.lastSpec.VolumeMounts[0].HostPath != volumeHostPath {
+		t.Fatalf("unexpected host volume path: got %s want %s", backend.lastSpec.VolumeMounts[0].HostPath, volumeHostPath)
+	}
+	if len(backend.lastSpec.CloudInitProvision) != 1 || backend.lastSpec.CloudInitProvision[0] != "echo installed" {
+		t.Fatalf("unexpected cloud-init run commands: %#v", backend.lastSpec.CloudInitProvision)
+	}
+}
+
 func TestRunAndRemoveUpdateMountStateFile(t *testing.T) {
 	cache := t.TempDir()
 	data := t.TempDir()
@@ -1459,6 +1512,21 @@ func TestRunRequiresImage(t *testing.T) {
 		t.Fatalf("expected error for missing image")
 	}
 	if !strings.Contains(err.Error(), "image ubuntu:24.04 is not ready") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewRejectsRelativeVolumeGuestPath(t *testing.T) {
+	backend := newFakeBackend()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	application := NewWithBackend(&out, &errOut, backend)
+
+	err := application.Run([]string{"new", "ubuntu:24.04", "--volume", ".openclaw:root/.openclaw"})
+	if err == nil {
+		t.Fatal("expected new command to fail for non-absolute guest volume path")
+	}
+	if !strings.Contains(err.Error(), "guest path must be absolute") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

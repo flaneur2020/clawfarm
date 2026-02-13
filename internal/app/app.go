@@ -81,6 +81,8 @@ func (a *App) Run(args []string) error {
 	switch args[0] {
 	case "image":
 		return a.runImage(args[1:])
+	case "new":
+		return a.runNew(args[1:])
 	case "run":
 		return a.runRun(args[1:])
 	case "ps":
@@ -848,6 +850,25 @@ func resolveClawboxPath(input string) (string, error) {
 	return absolutePath, nil
 }
 
+func (a *App) runNew(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: clawfarm new <image-ref> [--workspace=. --port=18789 --publish host:guest] [--run \"cmd\" --volume name:/guest/path]")
+	}
+
+	forwarded := append([]string(nil), args...)
+	if !hasCLIFlag(forwarded, "--no-wait") {
+		forwarded = append(forwarded, "--no-wait")
+	}
+	if !hasCLIFlag(forwarded, "--openclaw-model-primary") {
+		forwarded = append(forwarded, "--openclaw-model-primary", "ollama/llama3")
+	}
+	if !hasCLIFlag(forwarded, "--openclaw-gateway-auth-mode") {
+		forwarded = append(forwarded, "--openclaw-gateway-auth-mode", "none")
+	}
+
+	return a.runRun(forwarded)
+}
+
 func (a *App) runRun(args []string) error {
 	args = normalizeRunArgs(args)
 
@@ -883,6 +904,8 @@ func (a *App) runRun(args []string) error {
 	openClawWhatsAppVerifyToken := ""
 	openClawWhatsAppAppSecret := ""
 	var published portList
+	var runCommands stringList
+	var volumes volumeList
 	var openClawEnvironment envVarList
 
 	flags.StringVar(&workspace, "workspace", ".", "workspace path to mount")
@@ -914,6 +937,8 @@ func (a *App) runRun(args []string) error {
 	flags.StringVar(&openClawWhatsAppVerifyToken, "openclaw-whatsapp-verify-token", "", "WhatsApp verify token (maps to WHATSAPP_VERIFY_TOKEN)")
 	flags.StringVar(&openClawWhatsAppAppSecret, "openclaw-whatsapp-app-secret", "", "WhatsApp app secret (maps to WHATSAPP_APP_SECRET)")
 	flags.Var(&openClawEnvironment, "openclaw-env", "OpenClaw env override KEY=VALUE (repeatable)")
+	flags.Var(&runCommands, "run", "run command inside guest during bootstrap (repeatable)")
+	flags.Var(&volumes, "volume", "volume mapping name:/guest/abs/path (repeatable)")
 	flags.Var(&published, "publish", "host:guest mapping (repeatable)")
 	flags.Var(&published, "port-forward", "alias of --publish (repeatable)")
 
@@ -921,7 +946,7 @@ func (a *App) runRun(args []string) error {
 		return err
 	}
 	if flags.NArg() != 1 {
-		return errors.New("usage: clawfarm run <ref|file.clawbox|.> [--workspace=. --port=18789 --publish host:guest] [--openclaw-config path --openclaw-env-file path --openclaw-env KEY=VALUE] [--openclaw-openai-api-key ... --openclaw-discord-token ...]")
+		return errors.New("usage: clawfarm run <ref|file.clawbox|.> [--workspace=. --port=18789 --publish host:guest] [--run \"cmd\" --volume name:/guest/abs/path] [--openclaw-config path --openclaw-env-file path --openclaw-env KEY=VALUE] [--openclaw-openai-api-key ... --openclaw-discord-token ...]")
 	}
 	if gatewayPort < 1 || gatewayPort > 65535 {
 		return fmt.Errorf("invalid gateway port %d: expected 1-65535", gatewayPort)
@@ -1052,6 +1077,8 @@ func (a *App) runRun(args []string) error {
 	for _, mapping := range published.Mappings {
 		vmPublished = append(vmPublished, vm.PortMapping{HostPort: mapping.HostPort, GuestPort: mapping.GuestPort})
 	}
+	requestedRunCommands := normalizeProvisionCommands(runCommands.Values)
+	requestedVolumeMappings := append([]volumeMapping(nil), volumes.Mappings...)
 
 	id := runTarget.ClawID
 	if id == "" {
@@ -1097,6 +1124,19 @@ func (a *App) runRun(args []string) error {
 		sourceDiskPath := instanceImagePath
 		clawPath := ""
 		cloudInitProvision := []string{}
+		vmVolumeMounts := make([]vm.VolumeMount, 0, len(requestedVolumeMappings))
+		for _, volume := range requestedVolumeMappings {
+			hostVolumePath := filepath.Join(instanceDir, "volumes", volume.Name)
+			if err := ensureDir(hostVolumePath); err != nil {
+				_ = lockManager.ReleaseWhileLocked(context.Background(), state.ReleaseRequest{ClawID: id})
+				return err
+			}
+			vmVolumeMounts = append(vmVolumeMounts, vm.VolumeMount{
+				Name:      volume.Name,
+				HostPath:  hostVolumePath,
+				GuestPath: volume.GuestPath,
+			})
+		}
 
 		if runTarget.ClawboxV2Mode && runTarget.ClawboxV2Spec != nil {
 			importedRunDiskPath, importErr := importRunClawboxV2(runTarget, id, clawsRoot, imageMeta.RuntimeDisk)
@@ -1119,6 +1159,8 @@ func (a *App) runRun(args []string) error {
 			}
 		}
 
+		cloudInitProvision = append(cloudInitProvision, requestedRunCommands...)
+
 		if err := a.runProvisionCommands(context.Background(), instanceDir, imageMeta.RuntimeDisk, instanceImagePath, preparedTarget.LayerPaths, preparedTarget.ProvisionCommands); err != nil {
 			_ = lockManager.ReleaseWhileLocked(context.Background(), state.ReleaseRequest{ClawID: id})
 			return err
@@ -1135,6 +1177,7 @@ func (a *App) runRun(args []string) error {
 			GatewayHostPort:     gatewayPort,
 			GatewayGuestPort:    gatewayPort,
 			PublishedPorts:      vmPublished,
+			VolumeMounts:        vmVolumeMounts,
 			CPUs:                cpus,
 			MemoryMiB:           memoryMiB,
 			OpenClawPackage:     openClawPackage,
@@ -1205,6 +1248,10 @@ func (a *App) runRun(args []string) error {
 		for _, mapping := range instance.PublishedPorts {
 			fmt.Fprintf(a.out, "publish: 127.0.0.1:%d -> %d\n", mapping.HostPort, mapping.GuestPort)
 		}
+	}
+	for _, volume := range requestedVolumeMappings {
+		hostVolumePath := filepath.Join(instanceDir, "volumes", volume.Name)
+		fmt.Fprintf(a.out, "volume: %s -> %s\n", hostVolumePath, volume.GuestPath)
 	}
 
 	if noWait {
@@ -1829,6 +1876,8 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.out, "Usage:")
 	fmt.Fprintln(a.out, "  clawfarm image ls")
 	fmt.Fprintln(a.out, "  clawfarm image fetch <ref>")
+	fmt.Fprintln(a.out, "  clawfarm new <image-ref> [--workspace=. --port=18789 --publish host:guest]")
+	fmt.Fprintln(a.out, "              [--run \"cmd\" --run \"cmd\" --volume name:/guest/abs/path]")
 	fmt.Fprintln(a.out, "  clawfarm run <ref|file.clawbox|.> [--workspace=. --port=18789 --publish host:guest]")
 	fmt.Fprintln(a.out, "             [--openclaw-config path --openclaw-agent-workspace /workspace --openclaw-model-primary openai/gpt-5]")
 	fmt.Fprintln(a.out, "             [--openclaw-gateway-mode local --openclaw-gateway-auth-mode token --openclaw-gateway-token xxx]")
@@ -1848,10 +1897,80 @@ func (a *App) printUsage() {
 	fmt.Fprintln(a.out, "")
 	fmt.Fprintln(a.out, "Examples:")
 	fmt.Fprintln(a.out, "  clawfarm image fetch ubuntu:24.04")
+	fmt.Fprintln(a.out, "  clawfarm new ubuntu:24.04 --run \"echo hello\" --volume .openclaw:/root/.openclaw")
 	fmt.Fprintln(a.out, "  clawfarm run ubuntu:24.04 --workspace=. --publish 8080:80")
 	fmt.Fprintln(a.out, "  clawfarm run ubuntu:24.04 --openclaw-openai-api-key $OPENAI_API_KEY --openclaw-discord-token $DISCORD_TOKEN")
 	fmt.Fprintln(a.out, "  clawfarm checkpoint claw-1234 --name before-upgrade")
 	fmt.Fprintln(a.out, "  clawfarm restore claw-1234 before-upgrade")
+}
+
+type stringList struct {
+	Values []string
+}
+
+func (l *stringList) String() string {
+	return strings.Join(l.Values, ",")
+}
+
+func (l *stringList) Set(value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return errors.New("value must not be empty")
+	}
+	l.Values = append(l.Values, trimmed)
+	return nil
+}
+
+type volumeMapping struct {
+	Name      string
+	GuestPath string
+}
+
+type volumeList struct {
+	Values   []string
+	Mappings []volumeMapping
+}
+
+func (l *volumeList) String() string {
+	return strings.Join(l.Values, ",")
+}
+
+func (l *volumeList) Set(value string) error {
+	mapping, err := parseVolumeMapping(value)
+	if err != nil {
+		return err
+	}
+	l.Values = append(l.Values, value)
+	l.Mappings = append(l.Mappings, mapping)
+	return nil
+}
+
+func parseVolumeMapping(input string) (volumeMapping, error) {
+	parts := strings.SplitN(strings.TrimSpace(input), ":", 2)
+	if len(parts) != 2 {
+		return volumeMapping{}, fmt.Errorf("invalid volume value %q: expected name:/guest/abs/path", input)
+	}
+
+	name := strings.TrimSpace(parts[0])
+	if name == "" {
+		return volumeMapping{}, fmt.Errorf("invalid volume value %q: volume name is required", input)
+	}
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
+		return volumeMapping{}, fmt.Errorf("invalid volume name %q", name)
+	}
+	if matched, _ := regexp.MatchString(`^[A-Za-z0-9._-]+$`, name); !matched {
+		return volumeMapping{}, fmt.Errorf("invalid volume name %q", name)
+	}
+
+	guestPath := strings.TrimSpace(parts[1])
+	if guestPath == "" {
+		return volumeMapping{}, fmt.Errorf("invalid volume value %q: guest path is required", input)
+	}
+	if !filepath.IsAbs(guestPath) {
+		return volumeMapping{}, fmt.Errorf("invalid volume value %q: guest path must be absolute", input)
+	}
+
+	return volumeMapping{Name: name, GuestPath: guestPath}, nil
 }
 
 type portList struct {
@@ -2507,6 +2626,19 @@ func normalizeRunArgs(args []string) []string {
 	reordered = append(reordered, args[1:]...)
 	reordered = append(reordered, args[0])
 	return reordered
+}
+
+func hasCLIFlag(args []string, flagName string) bool {
+	for index := 0; index < len(args); index++ {
+		value := strings.TrimSpace(args[index])
+		if value == "" {
+			continue
+		}
+		if value == flagName || strings.HasPrefix(value, flagName+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func copyFile(sourcePath string, destinationPath string) error {

@@ -16,6 +16,12 @@ type PortMapping struct {
 	GuestPort int
 }
 
+type VolumeMount struct {
+	Name      string
+	HostPath  string
+	GuestPath string
+}
+
 type StartSpec struct {
 	InstanceID          string
 	InstanceDir         string
@@ -27,6 +33,7 @@ type StartSpec struct {
 	GatewayHostPort     int
 	GatewayGuestPort    int
 	PublishedPorts      []PortMapping
+	VolumeMounts        []VolumeMount
 	CPUs                int
 	MemoryMiB           int
 	OpenClawPackage     string
