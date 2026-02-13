@@ -10,11 +10,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/yazhou/krunclaw/internal/cloudinitbuilder"
+	"github.com/yazhou/krunclaw/internal/qemubuilder"
 )
 
 const (
@@ -241,97 +243,40 @@ func buildQEMUArgs(
 	pidFilePath string,
 	monitorPath string,
 ) ([]string, error) {
-	paths := []string{diskPath, seedISO, spec.WorkspacePath, spec.StatePath, serialLogPath, qemuLogPath, pidFilePath, monitorPath}
-	if platform.Firmware != "" {
-		paths = append(paths, platform.Firmware)
-	}
-	for _, path := range paths {
-		if strings.Contains(path, ",") {
-			return nil, fmt.Errorf("path contains unsupported comma: %s", path)
-		}
+	published := make([]qemubuilder.PortMapping, 0, len(spec.PublishedPorts))
+	for _, mapping := range spec.PublishedPorts {
+		published = append(published, qemubuilder.PortMapping{HostPort: mapping.HostPort, GuestPort: mapping.GuestPort})
 	}
 
-	portForwards, err := normalizePortForwards(spec.GatewayHostPort, spec.GatewayGuestPort, spec.PublishedPorts)
+	builder := qemubuilder.NewQemuArgsBuilder().
+		WithPlatform(platform.Machine, platform.CPU, platform.Accel, platform.NetDevice, platform.Firmware).
+		WithDisk(diskPath, diskFormat, seedISO).
+		WithRuntimePaths(spec.WorkspacePath, spec.StatePath, spec.ClawPath, serialLogPath, qemuLogPath, pidFilePath, monitorPath).
+		WithPorts(spec.GatewayHostPort, spec.GatewayGuestPort, published).
+		WithResources(spec.CPUs, spec.MemoryMiB)
+	return builder.Build()
+}
+
+func normalizePortForwards(gatewayHostPort int, gatewayGuestPort int, published []PortMapping) ([]PortMapping, error) {
+	mappings := make([]qemubuilder.PortMapping, 0, len(published))
+	for _, mapping := range published {
+		mappings = append(mappings, qemubuilder.PortMapping{HostPort: mapping.HostPort, GuestPort: mapping.GuestPort})
+	}
+
+	resolved, err := qemubuilder.NormalizePortForwards(gatewayHostPort, gatewayGuestPort, mappings)
 	if err != nil {
 		return nil, err
 	}
 
-	netdev := "user,id=net0"
-	for _, mapping := range portForwards {
-		netdev += fmt.Sprintf(",hostfwd=tcp:127.0.0.1:%d-:%d", mapping.HostPort, mapping.GuestPort)
-	}
-
-	args := []string{
-		"-machine", fmt.Sprintf("%s,accel=%s", platform.Machine, platform.Accel),
-		"-cpu", platform.CPU,
-		"-smp", strconv.Itoa(spec.CPUs),
-		"-m", strconv.Itoa(spec.MemoryMiB),
-	}
-
-	if platform.Firmware != "" {
-		args = append(args, "-bios", platform.Firmware)
-	}
-
-	args = append(args,
-		"-boot", "order=c",
-		"-drive", fmt.Sprintf("if=virtio,format=%s,file=%s", diskFormat, diskPath),
-		"-drive", fmt.Sprintf("if=virtio,format=raw,readonly=on,file=%s", seedISO),
-		"-virtfs", fmt.Sprintf("local,path=%s,mount_tag=workspace,security_model=none,id=workspace", spec.WorkspacePath),
-		"-virtfs", fmt.Sprintf("local,path=%s,mount_tag=state,security_model=none,id=state", spec.StatePath),
-		"-netdev", netdev,
-		"-device", fmt.Sprintf("%s,netdev=net0", platform.NetDevice),
-		"-display", "none",
-		"-serial", "file:"+serialLogPath,
-		"-monitor", "unix:"+monitorPath+",server,nowait",
-		"-D", qemuLogPath,
-		"-daemonize",
-		"-pidfile", pidFilePath,
-	)
-
-	if strings.TrimSpace(spec.ClawPath) != "" {
-		args = append(args, "-virtfs", fmt.Sprintf("local,path=%s,mount_tag=claw,security_model=none,id=claw", spec.ClawPath))
-	}
-
-	return args, nil
-}
-
-func normalizePortForwards(gatewayHostPort int, gatewayGuestPort int, published []PortMapping) ([]PortMapping, error) {
-	if err := validatePort(gatewayHostPort); err != nil {
-		return nil, err
-	}
-	if err := validatePort(gatewayGuestPort); err != nil {
-		return nil, err
-	}
-
-	used := map[int]int{gatewayHostPort: gatewayGuestPort}
-	result := []PortMapping{{HostPort: gatewayHostPort, GuestPort: gatewayGuestPort}}
-	for _, mapping := range published {
-		if err := validatePort(mapping.HostPort); err != nil {
-			return nil, fmt.Errorf("publish %d:%d invalid host port: %w", mapping.HostPort, mapping.GuestPort, err)
-		}
-		if err := validatePort(mapping.GuestPort); err != nil {
-			return nil, fmt.Errorf("publish %d:%d invalid guest port: %w", mapping.HostPort, mapping.GuestPort, err)
-		}
-
-		existingGuest, exists := used[mapping.HostPort]
-		if exists {
-			if existingGuest == mapping.GuestPort {
-				continue
-			}
-			return nil, fmt.Errorf("duplicate host port %d with different guests (%d and %d)", mapping.HostPort, existingGuest, mapping.GuestPort)
-		}
-
-		used[mapping.HostPort] = mapping.GuestPort
-		result = append(result, mapping)
+	result := make([]PortMapping, 0, len(resolved))
+	for _, mapping := range resolved {
+		result = append(result, PortMapping{HostPort: mapping.HostPort, GuestPort: mapping.GuestPort})
 	}
 	return result, nil
 }
 
 func validatePort(port int) error {
-	if port < 1 || port > 65535 {
-		return errors.New("expected 1-65535")
-	}
-	return nil
+	return qemubuilder.ValidatePort(port)
 }
 
 func prepareInstanceDisk(sourceDiskPath string, instanceDir string, out io.Writer) (string, string, error) {
@@ -416,249 +361,32 @@ func findAArch64Firmware() (string, error) {
 }
 
 func createNoCloudSeedISO(spec StartSpec, outputPath string) error {
-	seedDir := filepath.Join(spec.InstanceDir, "seed")
-	if err := os.RemoveAll(seedDir); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(seedDir, 0o755); err != nil {
-		return err
-	}
-
-	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", spec.InstanceID, spec.InstanceID)
-	userData := buildCloudInitUserData(spec)
-
-	if err := os.WriteFile(filepath.Join(seedDir, "meta-data"), []byte(metaData), 0o644); err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(seedDir, "user-data"), []byte(userData), 0o644); err != nil {
-		return err
-	}
-
-	if _, err := exec.LookPath("hdiutil"); err != nil {
-		return errors.New("hdiutil is required to build cloud-init seed ISO")
-	}
-	if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-
-	command := exec.Command(
-		"hdiutil", "makehybrid", "-quiet",
-		"-o", outputPath,
-		seedDir,
-		"-iso",
-		"-joliet",
-		"-default-volume-name", "cidata",
-	)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("build seed iso: %s", strings.TrimSpace(string(output)))
-	}
-	return nil
+	builder := newCloudInitBuilder(spec)
+	return builder.CreateNoCloudSeedISO(outputPath)
 }
 
 func buildCloudInitUserData(spec StartSpec) string {
-	bootstrapScript := buildBootstrapScript(spec)
-	return fmt.Sprintf(`#cloud-config
-package_update: false
-users:
-  - default
-  - name: claw
-    gecos: Claw User
-    shell: /bin/bash
-    groups: [sudo]
-    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
-    lock_passwd: true
-write_files:
-  - path: /usr/local/bin/clawfarm-bootstrap.sh
-    permissions: "0755"
-    owner: root:root
-    content: |
-%s
-runcmd:
-  - [ bash, -lc, "/usr/local/bin/clawfarm-bootstrap.sh > /var/log/clawfarm-bootstrap.log 2>&1" ]
-`, indentForCloudConfig(bootstrapScript, 6))
+	builder := newCloudInitBuilder(spec)
+	return builder.BuildCloudInitUserData()
 }
 
 func buildBootstrapScript(spec StartSpec) string {
-	packageName := spec.OpenClawPackage
-	if packageName == "" {
-		packageName = "openclaw@latest"
-	}
-
-	openClawConfig := strings.TrimSpace(spec.OpenClawConfig)
-	if openClawConfig == "" {
-		openClawConfig = fmt.Sprintf(`{
-  "agents": {
-    "defaults": {
-      "workspace": "/workspace"
-    }
-  },
-  "gateway": {
-    "mode": "local",
-    "port": %d
-  }
-}`, spec.GatewayGuestPort)
-	}
-
-	openClawEnv := renderOpenClawEnvironment(spec.OpenClawEnvironment)
-	provisionScript := renderProvisionScript(spec.CloudInitProvision)
-
-	return fmt.Sprintf(`#!/usr/bin/env bash
-set -euxo pipefail
-
-modprobe 9p 2>/dev/null || true
-modprobe 9pnet 2>/dev/null || true
-modprobe 9pnet_virtio 2>/dev/null || true
-
-mkdir -p /workspace /root/.openclaw /etc/clawfarm
-
-if ! id -u claw >/dev/null 2>&1; then
-  useradd -m -s /bin/bash claw
-fi
-usermod -aG sudo claw || true
-install -d -m 0755 -o claw -g claw /claw
-
-if ! mountpoint -q /workspace; then
-  mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 workspace /workspace || true
-fi
-if ! mountpoint -q /root/.openclaw; then
-  mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 state /root/.openclaw || true
-fi
-if ! mountpoint -q /claw; then
-  mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 claw /claw || true
-fi
-
-chown -R claw:claw /claw || true
-
-cat >/etc/clawfarm/openclaw.json <<'CLAWFARM_OPENCLAW_JSON'
-%s
-CLAWFARM_OPENCLAW_JSON
-
-cat >/etc/clawfarm/openclaw.env <<'CLAWFARM_OPENCLAW_ENV'
-%s
-CLAWFARM_OPENCLAW_ENV
-chmod 0600 /etc/clawfarm/openclaw.env
-
-cat >/usr/local/bin/clawfarm-gateway.sh <<'SCRIPT'
-#!/usr/bin/env bash
-set -euo pipefail
-
-export HOME=/root
-export OPENCLAW_CONFIG_PATH=/etc/clawfarm/openclaw.json
-if [[ -f /etc/clawfarm/openclaw.env ]]; then
-  set -a
-  source /etc/clawfarm/openclaw.env
-  set +a
-fi
-
-if command -v openclaw >/dev/null 2>&1; then
-  exec openclaw gateway --allow-unconfigured --port %d
-fi
-
-exec /usr/bin/python3 -m http.server %d --directory /workspace
-SCRIPT
-chmod +x /usr/local/bin/clawfarm-gateway.sh
-
-%s
-
-cat >/etc/systemd/system/clawfarm-gateway.service <<'UNIT'
-[Unit]
-Description=clawfarm Gateway Service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/clawfarm-gateway.sh
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-systemctl daemon-reload
-systemctl enable --now clawfarm-gateway.service
-
-if ! command -v openclaw >/dev/null 2>&1; then
-  (
-    set +e
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y --no-install-recommends ca-certificates curl gnupg bash python3
-    if ! command -v node >/dev/null 2>&1; then
-      curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-      apt-get install -y --no-install-recommends nodejs
-    fi
-    npm install -g %s
-    systemctl restart clawfarm-gateway.service
-  ) >/var/log/clawfarm-openclaw-install.log 2>&1 &
-fi
-
-if [[ -x /usr/local/bin/clawfarm-provision.sh ]]; then
-  /usr/local/bin/clawfarm-provision.sh >/var/log/clawfarm-provision.log 2>&1
-fi
-`, openClawConfig, openClawEnv, spec.GatewayGuestPort, spec.GatewayGuestPort, provisionScript, packageName)
-}
-
-func renderProvisionScript(commands []string) string {
-	if len(commands) == 0 {
-		return ""
-	}
-
-	var builder strings.Builder
-	builder.WriteString("cat >/usr/local/bin/clawfarm-provision.sh <<'PROVISION'\n")
-	builder.WriteString("#!/usr/bin/env bash\n")
-	builder.WriteString("set -euxo pipefail\n")
-	builder.WriteString("export HOME=/home/claw\n")
-	builder.WriteString("cd /claw\n")
-	for _, command := range commands {
-		trimmed := strings.TrimSpace(command)
-		if trimmed == "" {
-			continue
-		}
-		builder.WriteString(trimmed)
-		builder.WriteString("\n")
-	}
-	builder.WriteString("PROVISION\n")
-	builder.WriteString("chmod +x /usr/local/bin/clawfarm-provision.sh\n")
-	builder.WriteString("chown claw:claw /usr/local/bin/clawfarm-provision.sh\n")
-	return builder.String()
-}
-
-func renderOpenClawEnvironment(values map[string]string) string {
-	if len(values) == 0 {
-		return "# no extra environment overrides"
-	}
-
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	lines := make([]string, 0, len(keys))
-	for _, key := range keys {
-		lines = append(lines, fmt.Sprintf("export %s=%s", key, shellSingleQuote(values[key])))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func shellSingleQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+	builder := newCloudInitBuilder(spec)
+	return builder.BuildBootstrapScript()
 }
 
 func indentForCloudConfig(content string, spaces int) string {
-	prefix := strings.Repeat(" ", spaces)
-	trimmed := strings.TrimSuffix(content, "\n")
-	lines := strings.Split(trimmed, "\n")
-	var builder strings.Builder
-	for _, line := range lines {
-		builder.WriteString(prefix)
-		builder.WriteString(line)
-		builder.WriteString("\n")
-	}
-	return strings.TrimSuffix(builder.String(), "\n")
+	return cloudinitbuilder.IndentForCloudConfig(content, spaces)
+}
+
+func newCloudInitBuilder(spec StartSpec) *cloudinitbuilder.CloudInitBuilder {
+	return cloudinitbuilder.NewCloudInitBuilder().
+		WithInstance(spec.InstanceID, spec.InstanceDir).
+		WithGatewayGuestPort(spec.GatewayGuestPort).
+		WithOpenClawPackage(spec.OpenClawPackage).
+		WithOpenClawConfig(spec.OpenClawConfig).
+		WithOpenClawEnvironment(spec.OpenClawEnvironment).
+		WithCloudInitProvision(spec.CloudInitProvision)
 }
 
 func waitForPIDFile(path string, timeout time.Duration) (int, error) {

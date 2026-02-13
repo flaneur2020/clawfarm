@@ -1,183 +1,202 @@
-# RFC 007 — Clawfarm Consolidated Design (Current Baseline)
+# SPEC — Clawspec (Bootstrap-Oriented)
 
-- **Status:** Draft (working baseline)
+- **Status:** Draft (active)
 - **Date:** 2026-02-12
 - **Project:** `clawfarm`
-- **Supersedes (conceptually):** RFC 001–006 (now archived)
 
 ---
 
-## 0. Key Ideas (Top-Level Summary)
+## 0. Key Decisions
 
-1. `clawfarm` is an **agent-first VM sandbox runtime**, prioritizing guest systems with GUI capabilities.
-2. `.clawbox` is a **distribution format only** (import/export), not a runtime-mounted control plane.
-3. `run <file.clawbox>` means **import first, then run**.
-4. Runtime identity is per-instance **CLAWID**; the same `.clawbox` can start multiple instances.
-5. Runtime storage is centered on `~/.clawfarm`, with blob dedup via content address (`blobs/<sha256>`).
-6. Initialization is generated from `clawspec` through **cloud-init**.
-7. Guest bootstrap must create `claw` user with sudo `NOPASSWD:ALL`.
-8. The product is **not** a general-purpose VM manager; it is optimized for AI agent workloads.
+1. Clawspec is the source of truth for runtime bootstrap behavior.
+2. Agent runtime is **not preinstalled** in base images.
+3. The old `preset` concept is renamed to **`bootstrap`**.
+4. `clawfarm new` generates clawspec via TUI prompts.
+5. `bootstrap` declares install/start scripts and parameter schema.
 
 ---
 
-## 1. Design Target
+## 1. Scope
 
-Provide a practical, sharable, reproducible VM runtime for OpenClaw/agent workflows:
+This document defines:
 
-- Easy to package and share as `.clawbox`.
-- Easy to run repeatedly with different names/instances.
-- Stable runtime semantics around `CLAWID`.
-- Ready for GUI-first product evolution without coupling runtime to legacy mount semantics.
+- Clawspec JSON schema.
+- `bootstrap` structure and parameter definitions.
+- Validation rules for `clawfarm new` and `clawfarm run`.
 
----
-
-## 2. Goals
-
-- **G1:** Keep `.clawbox` focused on import/export distribution.
-- **G2:** Keep runtime model instance-centric (`CLAWID`) and concurrency-friendly.
-- **G3:** Support agent runtime bootstrap from `clawspec` + cloud-init.
-- **G4:** Keep cache and artifact handling deterministic via SHA256.
-- **G5:** Keep UX agent-centric (credentials/config preflight, health visibility, repeatable run flow).
+This document does **not** define general VM lifecycle features.
 
 ---
 
-## 3. Non-Goals
+## 2. Schema Overview
 
-- Become a full-featured, general-purpose VM lifecycle platform.
-- Optimize for non-agent infrastructure workflows first.
-- Preserve legacy RFC semantics when they conflict with this baseline.
+Proposed schema version: `3`.
 
----
+Top-level fields:
 
-## 4. Runtime Model
-
-## 4.1 Instance Identity and Concurrency
-
-- Every run yields one `CLAWID`.
-- Locking is instance-scoped (per `CLAWID`).
-- Running from the same source `.clawbox` multiple times is valid.
-
-## 4.2 Run Semantics
-
-`clawfarm run demo.clawbox --name demo-a` is interpreted as:
-
-1. Parse and validate the clawbox payload.
-2. Import required artifacts into `~/.clawfarm` (dedup by SHA256).
-3. Materialize one instance directory for a new `CLAWID`.
-4. Generate cloud-init and start VM.
-
-## 4.3 Health Semantics
-
-`ps` must surface unhealthy/exited states and last error, not only healthy/running instances.
+- `schema_version` (number, required)
+- `name` (string, required)
+- `image` (array, required)
+- `bootstrap` (object, required)
+- `provision` (array, optional)
 
 ---
 
-## 5. Clawbox Format (Distribution)
+## 3. `image[]` Definition
 
-`.clawbox` baseline format is `tar.gz` with at least:
+Each image entry:
 
-```text
-clawspec.json
-run.qcow2
-```
-
-Optional payload:
-
-```text
-claw/
-  ...
-```
+- `name` (string, required)
+- `ref` (string, required)
+- `sha256` (string, required)
 
 Rules:
 
-- `clawspec.json` is required.
-- `run.qcow2` and any embedded artifacts are verified by SHA256 from spec.
-- No plaintext secrets should be bundled in `.clawbox`.
+- Must contain one `name=base` entry.
+- May contain one `name=run` entry.
+- `sha256` must be lowercase 64-hex.
 
 ---
 
-## 6. Clawspec Baseline (v2 Direction)
+## 4. `bootstrap` Definition
 
-Expected logical fields:
+`bootstrap` describes how to initialize agent runtime in guest VM.
 
-- `schema_version`
-- `name`
-- `image[]` (must include `base`; may include `run`)
-- `openclaw` (model/auth/env requirements)
-- `provision[]` (to be transformed into cloud-init actions)
+Fields:
 
-If artifacts are remote:
+- `id` (string, required): bootstrap type id, e.g. `openclaw`.
+- `display_name` (string, optional): user-facing label.
+- `install_script` (string, required): shell script to install runtime dependencies.
+- `start_script` (string, required): shell script/command to start runtime service.
+- `params` (object, required): runtime parameter schema.
 
-- Download to temp file first.
-- Verify SHA256.
-- Atomically rename to `~/.clawfarm/blobs/<sha256>`.
-- If hash file already exists and verifies, reuse directly.
+`bootstrap.params` fields:
+
+- `required` (array, required)
+- `optional` (array, optional)
+
+Parameter object fields:
+
+- `key` (string, required)
+- `label` (string, required)
+- `description` (string, optional)
+- `secret` (bool, required)
+- `default` (string, optional, only for non-secret recommended)
+- `validator` (object, optional)
+
+`validator.kind` examples:
+
+- `non_empty`
+- `regex`
+- `enum`
+
+Current supported `bootstrap.id`:
+
+- `openclaw`
 
 ---
 
-## 7. Directory Layout
+## 5. `provision[]` Definition (Optional)
 
-```text
-~/.clawfarm/
-  blobs/
-    <sha256>
+Each provision step:
 
-  claws/
-    <CLAWID>/
-      clawspec.json
-      run.qcow2
-      env
-      init.iso
-      claw/
-      state/
-      logs/
-      ...
+- `name` (string, optional)
+- `shell` (string, optional; default runtime shell)
+- `script` (string, required)
+
+Provision runs after bootstrap install/start preparation.
+
+---
+
+## 6. Example Clawspec
+
+```json
+{
+  "schema_version": 3,
+  "name": "demo-openclaw",
+  "image": [
+    {
+      "name": "base",
+      "ref": "ubuntu:24.04",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "run",
+      "ref": "clawbox:///run.qcow2",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "bootstrap": {
+    "id": "openclaw",
+    "display_name": "OpenClaw",
+    "install_script": "#!/usr/bin/env bash\nset -euxo pipefail\n# install openclaw runtime",
+    "start_script": "#!/usr/bin/env bash\nset -euxo pipefail\n# start openclaw gateway",
+    "params": {
+      "required": [
+        {
+          "key": "OPENAI_API_KEY",
+          "label": "OpenAI API Key",
+          "description": "Used by OpenClaw provider",
+          "secret": true,
+          "validator": { "kind": "non_empty" }
+        }
+      ],
+      "optional": [
+        {
+          "key": "DISCORD_TOKEN",
+          "label": "Discord Token",
+          "description": "Enable Discord integration",
+          "secret": true
+        }
+      ]
+    }
+  },
+  "provision": [
+    {
+      "name": "project-setup",
+      "shell": "bash",
+      "script": "echo 'setup done'"
+    }
+  ]
+}
 ```
 
-Notes:
+---
 
-- `blobs/` is shared content-addressed storage.
-- `claws/<CLAWID>/` is the instance root, including imported payload and runtime metadata.
+## 7. Validation Rules
+
+Hard validation:
+
+- Missing required top-level fields => fail.
+- Unsupported `schema_version` => fail.
+- Unknown `bootstrap.id` => fail.
+- Missing `bootstrap.install_script` or `bootstrap.start_script` => fail.
+- Required params unresolved at runtime => fail before VM creation.
+
+Security validation:
+
+- Secret params should not be embedded as plain values in clawspec by default.
+- Secret input in TUI must be masked.
+
+Artifact validation:
+
+- Downloaded artifacts must pass SHA256 verification.
 
 ---
 
-## 8. Cloud-init and Guest Bootstrap Requirements
+## 8. `clawfarm new` Contract
 
-Minimum required behavior:
+`clawfarm new` must:
 
-1. Create user `claw` in guest.
-2. Ensure `claw` has sudo with `NOPASSWD:ALL`.
-3. Mount runtime paths (`/workspace`, state path, and `/claw` when provided).
-4. Materialize OpenClaw config/env from host-provided values.
-5. Install/start OpenClaw service in guest.
-6. Execute provision steps generated from `clawspec`.
-
----
-
-## 9. CLI Product Direction
-
-User-centric command surface target:
-
-- `clawfarm new`
-- `clawfarm run <box> --name <name>`
-- `clawfarm ps`
-- `clawfarm stop <CLAWID>`
-- `clawfarm export <CLAWID> <output.clawbox>`
-
-Implementation may temporarily keep compatibility aliases while converging on this surface.
+1. Let user choose bootstrap type (currently only `openclaw`).
+2. Prompt required params first, optional params next.
+3. Validate each input in TUI.
+4. Mask secret inputs with `*`.
+5. Generate clawspec with `bootstrap` section populated.
 
 ---
 
-## 10. Security and Secrets
+## 9. Compatibility Note
 
-- Required runtime env keys must be validated before VM creation.
-- Missing required credentials should fail fast (or use guided input in interactive mode).
-- Export should continue secret scanning and require explicit override when risky payload is detected.
-
----
-
-## 11. Migration / Documentation Cleanup
-
-- RFC 001–006 are archived under `rfc/archived/` for historical context.
-- This RFC is the primary design baseline moving forward.
-- When conflicts exist, this RFC takes precedence unless replaced by a newer consolidated RFC.
+- `preset` is deprecated in spec terminology.
+- New documents and code should use `bootstrap`.
